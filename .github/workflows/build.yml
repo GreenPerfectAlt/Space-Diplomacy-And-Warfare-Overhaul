@@ -184,7 +184,7 @@ jobs:
       - name: Build C++ Project
         run: |
          cd "${{ matrix.solution.directory }}"
-         msbuild "${{ matrix.solution.sln }}" /m "/p:Configuration=Release,Platform=x86" `
+         msbuild "${{ matrix.solution.sln }}" /m "/p:Configuration=Release,Platform=x86,PlatformToolset=v143" `
            "/p:SporeSDKPath=${{ github.workspace }}\Spore-ModAPI\,SporeLauncherPath=${{ github.workspace }}\" `
            /clp:Summary /v:m
 
