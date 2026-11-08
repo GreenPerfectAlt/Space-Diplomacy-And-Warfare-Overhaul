@@ -301,7 +301,7 @@ int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 		empire = StarManager.GetEmpire(planet->GetStarRecord()->mEmpireID);
 	}
 
-	int baseDefenders = GetDefendersInColony(); // Базовые 3-5
+	int baseDefenders = GetDefendersInColony();
 
 	if (empire != nullptr) {
 		Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
@@ -309,25 +309,34 @@ int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 			case Archetypes::kArchetypeWarrior:
 			case Archetypes::kArchetypeZealot:
 			case Archetypes::kArchetypeGrob:
-				// Военные и Гроксы выставляют массивный гарнизон
 				baseDefenders = (planet->mType == PlanetType::T3) ? 12 : ((planet->mType == PlanetType::T2) ? 8 : 5);
 				break;
 			case Archetypes::kArchetypeScientist:
 			case Archetypes::kArchetypeTrader:
-				// Ученые и Торговцы держат средний флот
 				baseDefenders = (planet->mType == PlanetType::T3) ? 8 : ((planet->mType == PlanetType::T2) ? 5 : 3);
 				break;
 			case Archetypes::kArchetypeEcologist:
-				// Экологи держат стабильную защиту
 				baseDefenders = (planet->mType == PlanetType::T3) ? 6 : ((planet->mType == PlanetType::T2) ? 4 : 2);
 				break;
 			case Archetypes::kArchetypeShaman:
 			case Archetypes::kArchetypeBard:
 			case Archetypes::kArchetypeDiplomat:
 			default:
-				// Мирные фракции держат легкий патруль
 				baseDefenders = (planet->mType == PlanetType::T3) ? 4 : ((planet->mType == PlanetType::T2) ? 3 : 2);
 				break;
+		}
+	}
+
+	// Учёт дополнительных колоний из Unlimited-Colony при нахождении в системе планеты
+	if (GetCurrentContext() == SpaceContext::Planet && planet == GetActivePlanetRecord()) {
+		int cityCount = 0;
+		const auto& cities = Simulator::GetData<cCity>();
+		for (const auto& city : cities) {
+			if (city) cityCount++;
+		}
+		int standardCities = (planet->mType == PlanetType::T3) ? 3 : ((planet->mType == PlanetType::T2) ? 2 : 1);
+		if (cityCount > standardCities) {
+			baseDefenders += (cityCount - standardCities) * 3;
 		}
 	}
 
@@ -340,18 +349,40 @@ int cSpaceCombatMetrics::GetTurretsInPlanet(Simulator::cPlanetRecord* planet)
 		return 0;
 	}
 
+	int baseTurrets = 0;
+	int standardCities = 1;
 	switch (planet->mType) {
-	case(PlanetType::T1): {
-		return GetTurretsInT1();
-	}
-	case(PlanetType::T2): {
-		return GetTurretsInT2();
-	}
-	case(PlanetType::T3): {
-		return GetTurretsInT3();
-	}
-	default: {
+	case(PlanetType::T1):
+		baseTurrets = GetTurretsInT1();
+		standardCities = 1;
+		break;
+	case(PlanetType::T2):
+		baseTurrets = GetTurretsInT2();
+		standardCities = 2;
+		break;
+	case(PlanetType::T3):
+		baseTurrets = GetTurretsInT3();
+		standardCities = 3;
+		break;
+	default:
 		return 0;
 	}
+
+	// Учёт реальных турелей всех колоний из Unlimited-Colony при активном штурме
+	if (GetCurrentContext() == SpaceContext::Planet && planet == GetActivePlanetRecord()) {
+		int actualTurrets = 0;
+		int cityCount = 0;
+		const auto& cities = Simulator::GetData<cCity>();
+		for (const auto& city : cities) {
+			if (city) {
+				cityCount++;
+				actualTurrets += static_cast<int>(city->mTurrets.size());
+			}
+		}
+		if (cityCount > standardCities && actualTurrets > 0) {
+			baseTurrets = actualTurrets;
+		}
 	}
+
+	return baseTurrets;
 }
