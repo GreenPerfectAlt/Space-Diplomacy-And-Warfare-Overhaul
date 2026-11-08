@@ -3,6 +3,7 @@
 #include <Spore-Mod-Utils/Include/SporeModUtils.h>
 #include <algorithm>
 #include <EASTL/sort.h>
+#include <cmath>
 
 using namespace SporeModUtils;
 using namespace Simulator;
@@ -21,7 +22,6 @@ cEmpireWarfare::cEmpireWarfare(Simulator::cEmpire* empire,
 	this->warfareStrengthAnalyzer = warfareStrengthAnalyzer;
 	this->warfareEventDispatcher = warfareEventDispatcher;
 }
-
 
 cEmpireWarfare::~cEmpireWarfare()
 {
@@ -55,36 +55,7 @@ bool cEmpireWarfare::AtackableStar(Simulator::cStarRecord* star) {
 	}
 	return true;
 }
-/*
-Simulator::cStarRecord* cEmpireWarfare::GetClosestEnemyStar(Simulator::cStarRecord* star) {
-	eastl::vector<cStarRecordPtr> closeStars;
 
-	StarRequestFilter filter;
-	filter.RemoveStarType(Simulator::StarType::None);
-	filter.RemoveStarType(Simulator::StarType::GalacticCore);
-	filter.RemoveStarType(Simulator::StarType::ProtoPlanetary);
-	filter.RemoveStarType(Simulator::StarType::BlackHole);
-	filter.techLevels = 0;
-	filter.AddTechLevel(Simulator::TechLevel::Empire);
-	filter.minDistance = 0;
-	filter.maxDistance = range;
-	StarManager.FindStars(star->mPosition, filter, closeStars);
-
-	Simulator::cStarRecord* closestStar = nullptr;
-	float closestDistance = range + 1.0f;
-	for (cStarRecordPtr closeStar : closeStars) {
-		cEmpire* starEmpire = StarManager.GetEmpire(closeStar->mEmpireID);
-		if (simulationValidator->ValidEmpire(starEmpire, true) && DiplomacyUtils::War(empire.get(), starEmpire) && AtackableStar(closeStar.get())) {
-			float distance = StarUtils::GetDistanceBetweenStars(star, closeStar.get());
-			if (distance < closestDistance) {
-				closestStar = closeStar.get();
-				closestDistance = distance;
-			}
-		}
-	}
-	return closestStar;
-}
-*/
 eastl::vector<cStarRecord*> cEmpireWarfare::GetEnemyStarsInRangeOfStar(Simulator::cStarRecord* star) {
 	eastl::vector<cStarRecordPtr> closeStars;
 
@@ -127,7 +98,6 @@ eastl::vector<cStarRecord*> cEmpireWarfare::GetEnemyStarsInRangeOfStar(Simulator
 	}
 
 	return orderedStars;
-
 }
 
 void cEmpireWarfare::CalculateAttackPriorities() {
@@ -139,12 +109,14 @@ void cEmpireWarfare::CalculateAttackPriorities() {
 			if (!enemyStarsInRangeOfStar.empty()) {
 				// Handle closest star.
 				cStarRecord* closestStar = enemyStarsInRangeOfStar.front();
-				attackPriorityMap[closestStar] += 100.0f / StarUtils::GetDistanceBetweenStars(homeworld, closestStar);
+				float distToHome = (homeworld != nullptr) ? max(StarUtils::GetDistanceBetweenStars(homeworld, closestStar), 0.1f) : 1.0f;
+				attackPriorityMap[closestStar] += 100.0f / distToHome;
 
 				// Handle the rest.
 				for (auto it = enemyStarsInRangeOfStar.begin() + 1; it != enemyStarsInRangeOfStar.end(); ++it) {
 					cStarRecord* closeStar = *it;
-					attackPriorityMap[closeStar] += 1.0f / StarUtils::GetDistanceBetweenStars(homeworld, closeStar);
+					float subDist = (homeworld != nullptr) ? max(StarUtils::GetDistanceBetweenStars(homeworld, closeStar), 0.1f) : 1.0f;
+					attackPriorityMap[closeStar] += 1.0f / subDist;
 				}
 			}
 		}
@@ -153,8 +125,24 @@ void cEmpireWarfare::CalculateAttackPriorities() {
 
 int cEmpireWarfare::GetEmpireBomberForceForPlanet(Simulator::cPlanetRecord* planet) {
 	int requiredBombers = warfareStrengthAnalyzer->GetBomberForceForPlanet(this->empire.get(), planet);
-	requiredBombers += static_cast<int>(round(static_cast<float>(requiredBombers) * warfareConfig->GetBombersMultiPlanetPenaltyFactor() * log(attackedPlanets + 1)));
-	return requiredBombers;
+
+	// Штраф за одновременную атаку нескольких планет
+	float multiAttackPenalty = warfareConfig->GetBombersMultiPlanetPenaltyFactor() * log(static_cast<float>(attackedPlanets) + 1.0f);
+	requiredBombers += static_cast<int>(round(static_cast<float>(requiredBombers) * multiAttackPenalty));
+
+	// Логистический штраф за расстояние снабжения от столицы
+	cStarRecord* homeworld = EmpireUtils::GetHomeStar(empire.get());
+	if (homeworld != nullptr && planet->GetStarRecord() != nullptr) {
+		float distanceToTarget = StarUtils::GetDistanceBetweenStars(homeworld, planet->GetStarRecord());
+		const float baseLogisticsRange = 15.0f;
+		if (distanceToTarget > baseLogisticsRange) {
+			// Каждые дополнительные парсеки требуют больше кораблей сопровождения (+2% за пк)
+			float logisticsPenaltyRatio = (distanceToTarget - baseLogisticsRange) * 0.02f;
+			requiredBombers += static_cast<int>(round(static_cast<float>(requiredBombers) * logisticsPenaltyRatio));
+		}
+	}
+
+	return max(requiredBombers, 1);
 }
 
 int cEmpireWarfare::GetEmpireBomberForceForSystem(Simulator::cStarRecord* star) {
@@ -166,9 +154,7 @@ int cEmpireWarfare::GetEmpireBomberForceForSystem(Simulator::cStarRecord* star) 
 		}
 	}
 	return requiredBombers;
-
 }
-
 
 void cEmpireWarfare::AttackStar(Simulator::cStarRecord* star, int bombers) {
 	eastl::vector<pair<cPlanetRecordPtr, int>> bombersPerPlanet;
@@ -202,6 +188,7 @@ void cEmpireWarfare::SelectAndAttackTargets() {
 	CalculateAttackPriorities();
 	float bombersPerCycle = warfareStrengthAnalyzer->GetBombersProducedByEmpire(empire.get());
 	float currentBombers = bombersPerCycle;
+
 	while (currentBombers > 0 && !attackPriorityMap.empty()) {
 
 		auto bestIt = attackPriorityMap.begin();
@@ -221,9 +208,20 @@ void cEmpireWarfare::SelectAndAttackTargets() {
 		cStarRecordPtr bestTarget = bestIt->first;
 		float bombersToAttackTarget = static_cast<float>(warfareStrengthAnalyzer->GetBomberForceForSystem(empire.get(), bestTarget.get()));
 		attackPriorityMap.erase(bestIt);
-		// If there are not enough bombers to fully overpower the target system, 
-		// use a probability based on the ratio of available to required bombers 
-		// to decide whether to attempt the attack this turn.
+
+		// Экономическая мобилизация: если флота не хватает, но есть деньги, закупаем подкрепления
+		if (bombersToAttackTarget > currentBombers && empire->mEmpireMoney >= 1000) {
+			int missingBombers = static_cast<int>(ceil(bombersToAttackTarget - currentBombers));
+			int affordableBombers = empire->mEmpireMoney / 1000;
+			int purchasedBombers = min(missingBombers, affordableBombers);
+
+			if (purchasedBombers > 0) {
+				currentBombers += static_cast<float>(purchasedBombers);
+				empire->mEmpireMoney -= purchasedBombers * 1000;
+			}
+		}
+
+		// Если всё ещё не хватает бомбардировщиков для уверенной победы
 		if (bombersToAttackTarget > currentBombers) {
 			float pOfAttack = currentBombers / bombersToAttackTarget;
 			float n = Math::randf();
@@ -233,7 +231,7 @@ void cEmpireWarfare::SelectAndAttackTargets() {
 			currentBombers = 0;
 		}
 		else {
-			// If there�s no more targets attack with all available bombers.
+			// Если целей больше нет — атакуем всеми оставшимися силами
 			if (attackPriorityMap.empty()) {
 				AttackStar(bestTarget.get(), static_cast<int>(round(currentBombers)));
 				currentBombers = 0;
@@ -242,7 +240,6 @@ void cEmpireWarfare::SelectAndAttackTargets() {
 				AttackStar(bestTarget.get(), static_cast<int>(round(bombersToAttackTarget)));
 				currentBombers -= GetEmpireBomberForceForSystem(bestTarget.get());
 			}
-			
 		}
 	}
 }
