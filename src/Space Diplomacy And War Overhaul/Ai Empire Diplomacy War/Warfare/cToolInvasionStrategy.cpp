@@ -31,7 +31,7 @@ bool cToolInvasionStrategy::OnSelect(Simulator::cSpaceToolData* pTool) {
 	bool inPlanetOrSystem = context == SpaceContext::Planet || context == SpaceContext::SolarSystem;
 	int beforeUsingToolMoney = playerEmpire->mEmpireMoney;
 
-	// OnSelect списывает стоимость вызова флота
+	// OnSelect списывает рассчитанную стоимость
 	if (!cToolStrategy::OnSelect(pTool) || beforeUsingToolMoney == playerEmpire->mEmpireMoney) return false;
 
 	if (inGalaxy && simulationValidator->ValidStar(GetActiveStarRecord())) {
@@ -115,38 +115,39 @@ int cToolInvasionStrategy::ProcessCost(int baseUseCost) {
 		return 0;
 	}
 
-	// 1. Модификатор стоимости по философии (архетипу) игрока
+	// 1. Динамический расчет скидки/наценки по архетипу через конфиг сил
 	float archetypeCostMultiplier = 1.0f;
-	if (playerEmpire != nullptr) {
+	if (playerEmpire != nullptr && warfareStrengthAnalyzer->archetypeStrengthConfig != nullptr) {
 		Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(playerEmpire->mArchetype);
-		switch (baseArchetype) {
-			case Archetypes::kArchetypeTrader:
-				archetypeCostMultiplier = 0.75f; // Скидка 25% торговцам
-				break;
-			case Archetypes::kArchetypeWarrior:
-				archetypeCostMultiplier = 0.85f; // Скидка 15% воинам и рыцарям
-				break;
-			case Archetypes::kArchetypeBard:
-			case Archetypes::kArchetypeShaman:
-			case Archetypes::kArchetypeDiplomat:
-				archetypeCostMultiplier = 1.25f; // Наценка 25% мирным империям
-				break;
-			default:
-				archetypeCostMultiplier = 1.0f;
-				break;
+		float archetypeStrength = warfareStrengthAnalyzer->archetypeStrengthConfig->GetArchetypeBaseStrength(playerEmpire->mArchetype);
+
+		if (baseArchetype == Archetypes::kArchetypeTrader) {
+			// Торговцы получают фиксированную финансовую субсидию от своей доктрины
+			archetypeCostMultiplier = 0.75f;
+		}
+		else if (archetypeStrength > 1.0f) {
+			// Воинственные цивилизации получают пропорциональную скидку за счет подготовки
+			archetypeCostMultiplier = 1.0f / archetypeStrength;
+		}
+		else if (archetypeStrength < 1.0f && archetypeStrength > 0.0f) {
+			// Мирные цивилизации платят пропорциональную наценку за наем частных эскадр
+			archetypeCostMultiplier = 1.0f / archetypeStrength;
 		}
 	}
 
-	// 2. Логистическая надбавка за расстояние от родного мира
+	// 2. Динамическая логистика расстояния от родного мира через радиус вооружения
 	float distancePenaltyMultiplier = 1.0f;
-	if (playerEmpire != nullptr && targetStar != nullptr) {
+	if (playerEmpire != nullptr && targetStar != nullptr && warfareStrengthAnalyzer->warfareConfig != nullptr) {
 		cStarRecord* homeworld = EmpireUtils::GetHomeStar(playerEmpire);
 		if (homeworld != nullptr) {
 			float distance = StarUtils::GetDistanceBetweenStars(homeworld, targetStar);
-			const float baseSupplyRange = 15.0f;
-			if (distance > baseSupplyRange) {
-				// +2% к стоимости за каждый парсек свыше 15 пк
-				distancePenaltyMultiplier += (distance - baseSupplyRange) * 0.02f;
+			// Базовый радиус снабжения равен дальности действия орудийных систем империи
+			float baseSupplyRange = warfareStrengthAnalyzer->warfareConfig->GetWarfareRange(playerEmpire->GetWeaponryLevel());
+			
+			if (distance > baseSupplyRange && baseSupplyRange > 0.0f) {
+				// Динамический коэффициент удорожания переброски от настройки штрафа мульти-атак
+				float stepPenalty = warfareStrengthAnalyzer->warfareConfig->GetBombersMultiPlanetPenaltyFactor() * 0.1f;
+				distancePenaltyMultiplier += (distance - baseSupplyRange) * stepPenalty;
 			}
 		}
 	}
