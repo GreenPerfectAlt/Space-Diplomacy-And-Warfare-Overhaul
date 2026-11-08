@@ -115,32 +115,27 @@ float cWarfareStrengthAnalyzer::GetBombersProducedByFactory(ResourceKey spiceKey
 }
 
 int cWarfareStrengthAnalyzer::GetFactoryCountInPlanet(Simulator::cPlanetRecord* planet){
-    int baseColonies = 1;
     switch (planet->mType) {
-        case(PlanetType::T1): baseColonies = 1; break;
-        case(PlanetType::T2): baseColonies = 2; break;
-        case(PlanetType::T3): 
-            baseColonies = PlanetUtils::Homeworld(planet) ? warfareConfig->GetCitiesInHomeworld() : 3;
-            break;
-        default: return 0;
+    case(PlanetType::T1): {
+        return warfareConfig->GetBuildingsInT1Colony() / warfareConfig->GetBuildingsPerFactoryRatio();
     }
-
-    // Поддержка Unlimited-Colony: если колоний больше базового лимита, масштабируем заводы
-    int actualColonies = baseColonies;
-    if (planet->GetPlanetView() && !planet->GetPlanetView()->mColonies.empty()) {
-        int viewCount = static_cast<int>(planet->GetPlanetView()->mColonies.size());
-        if (viewCount > actualColonies) {
-            actualColonies = viewCount;
+    case(PlanetType::T2): {
+        return warfareConfig->GetBuildingsInT2Colony() * 2 / warfareConfig->GetBuildingsPerFactoryRatio();
+    }
+    case(PlanetType::T3): {
+        if (PlanetUtils::Homeworld(planet)) {
+            return warfareConfig->GetBuildingsInT3Colony() * warfareConfig->GetCitiesInHomeworld() / warfareConfig->GetBuildingsPerFactoryRatio();
+        }
+        else {
+            return warfareConfig->GetBuildingsInT3Colony() * 3 / warfareConfig->GetBuildingsPerFactoryRatio();
         }
     }
-
-    int buildingsPerColony = warfareConfig->GetBuildingsInT1Colony();
-    if (planet->mType == PlanetType::T2) buildingsPerColony = warfareConfig->GetBuildingsInT2Colony();
-    else if (planet->mType == PlanetType::T3) buildingsPerColony = warfareConfig->GetBuildingsInT3Colony();
-
-    int totalBuildings = actualColonies * buildingsPerColony;
-    return max(totalBuildings / warfareConfig->GetBuildingsPerFactoryRatio(), 1);
+    default: {
+        return 0;
+    }
+    }
 }
+
 
 float cWarfareStrengthAnalyzer::GetBombersProducedByPlanet(Simulator::cPlanetRecord* planet){
     if (planet->GetTechLevel() == TechLevel::Empire) {
