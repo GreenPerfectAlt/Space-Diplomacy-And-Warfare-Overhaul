@@ -185,18 +185,25 @@ float cSpaceCombatMetrics::GetBomberHealthByEmpire(Simulator::cEmpire* empire)
 	switch (baseArchetype) {
 		case Archetypes::kArchetypeWarrior:
 		case Archetypes::kArchetypeZealot:
-			multiplier = 1.25f; // Военная броня
+		case Archetypes::kArchetypeGrob:
+			multiplier = 1.25f; // Военные и Гроксы
 			break;
 		case Archetypes::kArchetypeScientist:
-			multiplier = 1.10f; // Технологические щиты
+			multiplier = 1.10f; // Ученые
+			break;
+		case Archetypes::kArchetypeTrader:
+		case Archetypes::kArchetypeEcologist:
+			multiplier = 1.00f; // Торговцы и Экологи
+			break;
+		case Archetypes::kArchetypeShaman:
+			multiplier = 0.85f; // Шаманы
 			break;
 		case Archetypes::kArchetypeBard:
-		case Archetypes::kArchetypeShaman:
 		case Archetypes::kArchetypeDiplomat:
-			multiplier = 0.75f; // Облегченные корпуса
+			multiplier = 0.75f; // Барды, Дипломаты, Странники
 			break;
 		default:
-			multiplier = 1.00f; // Торговцы, Экологи и база
+			multiplier = 1.00f;
 			break;
 	}
 	return baseHealth * multiplier;
@@ -214,13 +221,20 @@ float cSpaceCombatMetrics::GetFighterHealthByEmpire(Simulator::cEmpire* empire)
 	switch (baseArchetype) {
 		case Archetypes::kArchetypeWarrior:
 		case Archetypes::kArchetypeZealot:
+		case Archetypes::kArchetypeGrob:
 			multiplier = 1.20f;
 			break;
 		case Archetypes::kArchetypeScientist:
 			multiplier = 1.10f;
 			break;
-		case Archetypes::kArchetypeBard:
+		case Archetypes::kArchetypeTrader:
+		case Archetypes::kArchetypeEcologist:
+			multiplier = 1.00f;
+			break;
 		case Archetypes::kArchetypeShaman:
+			multiplier = 0.90f;
+			break;
+		case Archetypes::kArchetypeBard:
 		case Archetypes::kArchetypeDiplomat:
 			multiplier = 0.80f;
 			break;
@@ -233,7 +247,38 @@ float cSpaceCombatMetrics::GetFighterHealthByEmpire(Simulator::cEmpire* empire)
 
 float cSpaceCombatMetrics::GetDefenderHealthByEmpire(Simulator::cEmpire* empire)
 {
-	return GetDefenderHealthByLevel(empire->GetWeaponryLevel());
+	float baseHealth = GetDefenderHealthByLevel(empire->GetWeaponryLevel());
+	if (empire == nullptr) {
+		return baseHealth;
+	}
+
+	Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
+	float multiplier = 1.0f;
+	switch (baseArchetype) {
+		case Archetypes::kArchetypeWarrior:
+		case Archetypes::kArchetypeZealot:
+		case Archetypes::kArchetypeGrob:
+			multiplier = 1.25f; // Защитники Воинов, Фанатиков и Гроксов крепче
+			break;
+		case Archetypes::kArchetypeScientist:
+			multiplier = 1.10f; // Защитники Ученых
+			break;
+		case Archetypes::kArchetypeTrader:
+		case Archetypes::kArchetypeEcologist:
+			multiplier = 1.00f; // Торговцы и Экологи
+			break;
+		case Archetypes::kArchetypeShaman:
+			multiplier = 0.85f; // Шаманы
+			break;
+		case Archetypes::kArchetypeBard:
+		case Archetypes::kArchetypeDiplomat:
+			multiplier = 0.75f; // Барды, Дипломаты, Странники
+			break;
+		default:
+			multiplier = 1.00f;
+			break;
+	}
+	return baseHealth * multiplier;
 }
 
 float cSpaceCombatMetrics::GetTurretHealthByEmpire(Simulator::cEmpire* empire)
@@ -250,9 +295,43 @@ int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 	if (planet->mType == PlanetType::T0) {
 		return GetDefendersInOutpost();
 	}
-	else {
-		return GetDefendersInColony();
+
+	cEmpire* empire = nullptr;
+	if (planet->GetStarRecord() != nullptr) {
+		empire = StarManager.GetEmpire(planet->GetStarRecord()->mEmpireID);
 	}
+
+	int baseDefenders = GetDefendersInColony(); // Базовые 3-5
+
+	if (empire != nullptr) {
+		Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
+		switch (baseArchetype) {
+			case Archetypes::kArchetypeWarrior:
+			case Archetypes::kArchetypeZealot:
+			case Archetypes::kArchetypeGrob:
+				// Военные и Гроксы выставляют массивный гарнизон
+				baseDefenders = (planet->mType == PlanetType::T3) ? 12 : ((planet->mType == PlanetType::T2) ? 8 : 5);
+				break;
+			case Archetypes::kArchetypeScientist:
+			case Archetypes::kArchetypeTrader:
+				// Ученые и Торговцы держат средний флот
+				baseDefenders = (planet->mType == PlanetType::T3) ? 8 : ((planet->mType == PlanetType::T2) ? 5 : 3);
+				break;
+			case Archetypes::kArchetypeEcologist:
+				// Экологи держат стабильную защиту
+				baseDefenders = (planet->mType == PlanetType::T3) ? 6 : ((planet->mType == PlanetType::T2) ? 4 : 2);
+				break;
+			case Archetypes::kArchetypeShaman:
+			case Archetypes::kArchetypeBard:
+			case Archetypes::kArchetypeDiplomat:
+			default:
+				// Мирные фракции держат легкий патруль
+				baseDefenders = (planet->mType == PlanetType::T3) ? 4 : ((planet->mType == PlanetType::T2) ? 3 : 2);
+				break;
+		}
+	}
+
+	return baseDefenders;
 }
 
 int cSpaceCombatMetrics::GetTurretsInPlanet(Simulator::cPlanetRecord* planet)
@@ -276,4 +355,3 @@ int cSpaceCombatMetrics::GetTurretsInPlanet(Simulator::cPlanetRecord* planet)
 	}
 	}
 }
-
