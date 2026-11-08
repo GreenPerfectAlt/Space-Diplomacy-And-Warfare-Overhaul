@@ -115,39 +115,37 @@ int cToolInvasionStrategy::ProcessCost(int baseUseCost) {
 		return 0;
 	}
 
-	// 1. Динамический расчет скидки/наценки по архетипу через конфиг сил
+	// 1. Модификатор философии игрока
 	float archetypeCostMultiplier = 1.0f;
-	if (playerEmpire != nullptr && warfareStrengthAnalyzer->archetypeStrengthConfig != nullptr) {
+	if (playerEmpire != nullptr) {
 		Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(playerEmpire->mArchetype);
-		float archetypeStrength = warfareStrengthAnalyzer->archetypeStrengthConfig->GetArchetypeBaseStrength(playerEmpire->mArchetype);
-
-		if (baseArchetype == Archetypes::kArchetypeTrader) {
-			// Торговцы получают фиксированную финансовую субсидию от своей доктрины
-			archetypeCostMultiplier = 0.75f;
-		}
-		else if (archetypeStrength > 1.0f) {
-			// Воинственные цивилизации получают пропорциональную скидку за счет подготовки
-			archetypeCostMultiplier = 1.0f / archetypeStrength;
-		}
-		else if (archetypeStrength < 1.0f && archetypeStrength > 0.0f) {
-			// Мирные цивилизации платят пропорциональную наценку за наем частных эскадр
-			archetypeCostMultiplier = 1.0f / archetypeStrength;
+		switch (baseArchetype) {
+			case Archetypes::kArchetypeTrader:
+				archetypeCostMultiplier = 0.75f;
+				break;
+			case Archetypes::kArchetypeWarrior:
+				archetypeCostMultiplier = 0.85f;
+				break;
+			case Archetypes::kArchetypeBard:
+			case Archetypes::kArchetypeShaman:
+			case Archetypes::kArchetypeDiplomat:
+				archetypeCostMultiplier = 1.25f;
+				break;
+			default:
+				archetypeCostMultiplier = 1.0f;
+				break;
 		}
 	}
 
-	// 2. Динамическая логистика расстояния от родного мира через радиус вооружения
+	// 2. Логистическая надбавка за расстояние от родного мира
 	float distancePenaltyMultiplier = 1.0f;
-	if (playerEmpire != nullptr && targetStar != nullptr && warfareStrengthAnalyzer->warfareConfig != nullptr) {
+	if (playerEmpire != nullptr && targetStar != nullptr) {
 		cStarRecord* homeworld = EmpireUtils::GetHomeStar(playerEmpire);
 		if (homeworld != nullptr) {
 			float distance = StarUtils::GetDistanceBetweenStars(homeworld, targetStar);
-			// Базовый радиус снабжения равен дальности действия орудийных систем империи
-			float baseSupplyRange = warfareStrengthAnalyzer->warfareConfig->GetWarfareRange(playerEmpire->GetWeaponryLevel());
-			
-			if (distance > baseSupplyRange && baseSupplyRange > 0.0f) {
-				// Динамический коэффициент удорожания переброски от настройки штрафа мульти-атак
-				float stepPenalty = warfareStrengthAnalyzer->warfareConfig->GetBombersMultiPlanetPenaltyFactor() * 0.1f;
-				distancePenaltyMultiplier += (distance - baseSupplyRange) * stepPenalty;
+			const float baseSupplyRange = 15.0f;
+			if (distance > baseSupplyRange) {
+				distancePenaltyMultiplier += (distance - baseSupplyRange) * 0.02f;
 			}
 		}
 	}
@@ -157,6 +155,7 @@ int cToolInvasionStrategy::ProcessCost(int baseUseCost) {
 
 	return max(totalCost, baseUseCost);
 }
+
 
 void cToolInvasionStrategy::InjectDependencies(cSimulationValidator* simulationValidator, cWarfareStrengthAnalyzer* warfareStrengthAnalyzer, cWarfareEventDispatcher* warfareEventDispatcher)
 {
