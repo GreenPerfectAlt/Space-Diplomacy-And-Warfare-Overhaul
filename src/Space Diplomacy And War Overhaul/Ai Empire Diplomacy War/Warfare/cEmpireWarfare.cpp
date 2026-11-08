@@ -27,19 +27,16 @@ cEmpireWarfare::~cEmpireWarfare()
 {
 }
 
-// For internal use, do not modify.
 int cEmpireWarfare::AddRef()
 {
 	return DefaultRefCounted::AddRef();
 }
 
-// For internal use, do not modify.
 int cEmpireWarfare::Release()
 {
 	return DefaultRefCounted::Release();
 }
 
-// You can extend this function to return any other types your class implements.
 void* cEmpireWarfare::Cast(uint32_t type) const
 {
 	CLASS_CAST(Object);
@@ -70,7 +67,6 @@ eastl::vector<cStarRecord*> cEmpireWarfare::GetEnemyStarsInRangeOfStar(Simulator
 	filter.maxDistance = range;
 	StarManager.FindStars(star->mPosition, filter, closeStars);
 
-	// Store pairs of (distance, star).
 	eastl::vector<eastl::pair<float, Simulator::cStarRecord*>> enemyStars;
 
 	for (cStarRecordPtr closeStar : closeStars) {
@@ -84,13 +80,11 @@ eastl::vector<cStarRecord*> cEmpireWarfare::GetEnemyStarsInRangeOfStar(Simulator
 		}
 	}
 
-	// Sort enemy stars by distance.
 	eastl::sort(enemyStars.begin(), enemyStars.end(),
 		[](const auto& a, const auto& b) {
 			return a.first < b.first;
 		});
 
-	// Extract only the star pointers in sorted order.
 	eastl::vector<Simulator::cStarRecord*> orderedStars;
 	orderedStars.reserve(enemyStars.size());
 	for (auto& pair : enemyStars) {
@@ -107,12 +101,10 @@ void cEmpireWarfare::CalculateAttackPriorities() {
 		if (star != nullptr) {
 			eastl::vector<cStarRecord*> enemyStarsInRangeOfStar = GetEnemyStarsInRangeOfStar(star.get());
 			if (!enemyStarsInRangeOfStar.empty()) {
-				// Handle closest star.
 				cStarRecord* closestStar = enemyStarsInRangeOfStar.front();
 				float distToHome = (homeworld != nullptr) ? max(StarUtils::GetDistanceBetweenStars(homeworld, closestStar), 0.1f) : 1.0f;
 				attackPriorityMap[closestStar] += 100.0f / distToHome;
 
-				// Handle the rest.
 				for (auto it = enemyStarsInRangeOfStar.begin() + 1; it != enemyStarsInRangeOfStar.end(); ++it) {
 					cStarRecord* closeStar = *it;
 					float subDist = (homeworld != nullptr) ? max(StarUtils::GetDistanceBetweenStars(homeworld, closeStar), 0.1f) : 1.0f;
@@ -126,19 +118,18 @@ void cEmpireWarfare::CalculateAttackPriorities() {
 int cEmpireWarfare::GetEmpireBomberForceForPlanet(Simulator::cPlanetRecord* planet) {
 	int requiredBombers = warfareStrengthAnalyzer->GetBomberForceForPlanet(this->empire.get(), planet);
 
-	// Штраф за одновременную атаку нескольких планет
 	float multiAttackPenalty = warfareConfig->GetBombersMultiPlanetPenaltyFactor() * log(static_cast<float>(attackedPlanets) + 1.0f);
 	requiredBombers += static_cast<int>(round(static_cast<float>(requiredBombers) * multiAttackPenalty));
 
-	// Логистический штраф за расстояние снабжения от столицы
+	// Логистика, привязанная к радиусу империи warfareRange вместо хардкода 15.0f
 	cStarRecord* homeworld = EmpireUtils::GetHomeStar(empire.get());
 	if (homeworld != nullptr && planet->GetStarRecord() != nullptr) {
 		float distanceToTarget = StarUtils::GetDistanceBetweenStars(homeworld, planet->GetStarRecord());
-		const float baseLogisticsRange = 15.0f;
-		if (distanceToTarget > baseLogisticsRange) {
-			// Каждые дополнительные парсеки требуют больше кораблей сопровождения (+2% за пк)
-			float logisticsPenaltyRatio = (distanceToTarget - baseLogisticsRange) * 0.02f;
-			requiredBombers += static_cast<int>(round(static_cast<float>(requiredBombers) * logisticsPenaltyRatio));
+		float effectiveSupplyRange = max(warfareConfig->GetWarfareRange(empire->GetWeaponryLevel()) * 0.5f, 5.0f);
+
+		if (distanceToTarget > effectiveSupplyRange) {
+			float logisticsPenaltyRatio = (distanceToTarget - effectiveSupplyRange) / effectiveSupplyRange;
+			requiredBombers += static_cast<int>(round(static_cast<float>(requiredBombers) * logisticsPenaltyRatio * 0.25f));
 		}
 	}
 
@@ -181,16 +172,18 @@ void cEmpireWarfare::AttackStar(Simulator::cStarRecord* star, int bombers) {
 }
 
 void cEmpireWarfare::SelectAndAttackTargets() {
-	if (empire->mEnemies.size() == 0) {
-		return;
-	}
+	if (empire->mEnemies.size() == 0) return;
+
 	range = warfareConfig->GetWarfareRange(empire->GetWeaponryLevel());
 	CalculateAttackPriorities();
 	float bombersPerCycle = warfareStrengthAnalyzer->GetBombersProducedByEmpire(empire.get());
 	float currentBombers = bombersPerCycle;
 
-	while (currentBombers > 0 && !attackPriorityMap.empty()) {
+	// Динамическая себестоимость закупки корабля от стоимости красной пряности
+	int dynamicUnitCost = static_cast<int>(round(1000.0f * (1.0f / max(warfareConfig->GetBombersPerRedSpiceFactory(), 0.1f))));
+	dynamicUnitCost = max(dynamicUnitCost, 250);
 
+	while (currentBombers > 0 && !attackPriorityMap.empty()) {
 		auto bestIt = attackPriorityMap.begin();
 		float maxPriority = -1.0f;
 		for (auto it = attackPriorityMap.begin(); it != attackPriorityMap.end(); ++it) {
@@ -209,19 +202,18 @@ void cEmpireWarfare::SelectAndAttackTargets() {
 		float bombersToAttackTarget = static_cast<float>(warfareStrengthAnalyzer->GetBomberForceForSystem(empire.get(), bestTarget.get()));
 		attackPriorityMap.erase(bestIt);
 
-		// Экономическая мобилизация: если флота не хватает, но есть деньги, закупаем подкрепления
-		if (bombersToAttackTarget > currentBombers && empire->mEmpireMoney >= 1000) {
+		// Экономическая мобилизация через динамическую цену
+		if (bombersToAttackTarget > currentBombers && empire->mEmpireMoney >= dynamicUnitCost) {
 			int missingBombers = static_cast<int>(ceil(bombersToAttackTarget - currentBombers));
-			int affordableBombers = empire->mEmpireMoney / 1000;
+			int affordableBombers = empire->mEmpireMoney / dynamicUnitCost;
 			int purchasedBombers = min(missingBombers, affordableBombers);
 
 			if (purchasedBombers > 0) {
 				currentBombers += static_cast<float>(purchasedBombers);
-				empire->mEmpireMoney -= purchasedBombers * 1000;
+				empire->mEmpireMoney -= purchasedBombers * dynamicUnitCost;
 			}
 		}
 
-		// Если всё ещё не хватает бомбардировщиков для уверенной победы
 		if (bombersToAttackTarget > currentBombers) {
 			float pOfAttack = currentBombers / bombersToAttackTarget;
 			float n = Math::randf();
@@ -231,7 +223,6 @@ void cEmpireWarfare::SelectAndAttackTargets() {
 			currentBombers = 0;
 		}
 		else {
-			// Если целей больше нет — атакуем всеми оставшимися силами
 			if (attackPriorityMap.empty()) {
 				AttackStar(bestTarget.get(), static_cast<int>(round(currentBombers)));
 				currentBombers = 0;
