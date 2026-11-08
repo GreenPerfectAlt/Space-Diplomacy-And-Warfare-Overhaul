@@ -87,21 +87,21 @@ int cWarfareStrengthAnalyzer::GetBomberForceForPlanet(Simulator::cEmpire* empire
 
     int requiredBombers = static_cast<int>(round(rawRequired * archetypeAssaultMultiplier));
     int maxBombers = warfareConfig->GetMaxBombersInRaid();
-    return min(requiredBombers, maxBombers);
-}
 
-int cWarfareStrengthAnalyzer::GetBomberForceForSystem(Simulator::cEmpire* empire, Simulator::cStarRecord* star){
-    if (!simulationValidator->ValidStar(star)) {
-        return 0;
+    // 1. Относительное масштабирование для столиц (без хардкодных цифр)
+    if (PlanetUtils::Homeworld(planet)) {
+        maxBombers = static_cast<int>(round(static_cast<float>(maxBombers) * 1.6f));
     }
-    int requiredBombers = 0;
-    for (cPlanetRecordPtr planet : star->GetPlanetRecords()) {
-        if (planet->GetTechLevel() == TechLevel::Empire) {
-            requiredBombers += GetBomberForceForPlanet(empire, planet.get());
-        }
+
+    // 2. Эластичный мягкий потолок рейда вместо жесткого min()
+    if (requiredBombers > maxBombers) {
+        float excess = static_cast<float>(requiredBombers - maxBombers);
+        requiredBombers = maxBombers + static_cast<int>(round(sqrt(excess) * 2.0f));
     }
+
     return requiredBombers;
 }
+
 
 float cWarfareStrengthAnalyzer::GetBombersProducedByFactory(ResourceKey spiceKey){
     float cheapestSpiceCost = SpiceUtils::GetSpiceBaseCost(SpiceUtils::GetCheapestSpice(spiceCosts), spiceCosts);
