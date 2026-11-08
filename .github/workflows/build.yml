@@ -264,12 +264,14 @@ jobs:
         if: ${{ contains(github.ref_type, 'tag') }}
         uses: ncipollo/release-action@v1.14.0
         with:
-          draft: true
+          allowUpdates: true
+          draft: false
           name: ${{ env.DRAFT_RELEASE_NAME }}
           prerelease: ${{ env.SPOREMOD_EXPERIMENTAL }}
           makeLatest: true
           tag: ${{ github.ref_name }}
           artifacts: ${{ env.SPOREMOD_NAME }}
+
 
       - name: Upload .sporemod artifact
         if: ${{ ! contains(github.ref_type, 'tag') }}
