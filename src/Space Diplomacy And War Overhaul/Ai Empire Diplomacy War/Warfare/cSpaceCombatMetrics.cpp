@@ -23,8 +23,8 @@ cSpaceCombatMetrics::cSpaceCombatMetrics(ResourceKey spaceCombatKey)
 	App::Property::GetArrayInt32(relationshipEffectsProp.get(), 0x067B69D0, defendersOutpost);
 	App::Property::GetArrayInt32(relationshipEffectsProp.get(), 0x067B69EB, defendersColony);
 
-	numDefendersInOutpost = defendersOutpost;
-	numDefendersInColony = defendersColony;
+	numDefendersInOutpost = !defendersOutpost.empty() ? defendersOutpost.front() : 1;
+	numDefendersInColony = !defendersColony.empty() ? defendersColony.front() : 3;
 
 	PropertyListPtr RaidWarProp;
 	PropManager.GetPropertyList(0xbbae6b99, 0x02ae1a8e, RaidWarProp);
