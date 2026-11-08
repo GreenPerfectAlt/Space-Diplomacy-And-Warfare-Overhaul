@@ -23,8 +23,8 @@ cSpaceCombatMetrics::cSpaceCombatMetrics(ResourceKey spaceCombatKey)
 	App::Property::GetArrayInt32(relationshipEffectsProp.get(), 0x067B69D0, defendersOutpost);
 	App::Property::GetArrayInt32(relationshipEffectsProp.get(), 0x067B69EB, defendersColony);
 
-	numDefendersInOutpost = defendersOutpost[0];
-	numDefendersInColony = defendersColony[0];
+	numDefendersInOutpost = defendersOutpost;
+	numDefendersInColony = defendersColony;
 
 	PropertyListPtr RaidWarProp;
 	PropManager.GetPropertyList(0xbbae6b99, 0x02ae1a8e, RaidWarProp);
@@ -77,69 +77,33 @@ void* cSpaceCombatMetrics::Cast(uint32_t type) const
 
 float cSpaceCombatMetrics::GetBomberHealthByLevel(int empireLevel)
 {
-	if (healthBomber.empty())
-	{
-		return 1.0f;
-	}
-	if (empireLevel < 0)
-	{
-		return healthBomber[0];
-	}
-	if (empireLevel >= int(healthBomber.size()))
-	{
-		return healthBomber.back();
-	}
+	if (healthBomber.empty()) return 1.0f;
+	if (empireLevel < 0) return healthBomber.front();
+	if (empireLevel >= int(healthBomber.size())) return healthBomber.back();
 	return healthBomber[empireLevel];
 }
 
 float cSpaceCombatMetrics::GetFighterHealthByLevel(int empireLevel)
 {
-	if (healthFighter.empty())
-	{
-		return 1.0f;
-	}
-	if (empireLevel < 0)
-	{
-		return healthFighter[0];
-	}
-	if (empireLevel >= int(healthFighter.size()))
-	{
-		return healthFighter.back();
-	}
+	if (healthFighter.empty()) return 1.0f;
+	if (empireLevel < 0) return healthFighter.front();
+	if (empireLevel >= int(healthFighter.size())) return healthFighter.back();
 	return healthFighter[empireLevel];
 }
 
 float cSpaceCombatMetrics::GetDefenderHealthByLevel(int empireLevel)
 {
-	if (healthDefender.empty())
-	{
-		return 1.0f;
-	}
-	if (empireLevel < 0)
-	{
-		return healthDefender[0];
-	}
-	if (empireLevel >= int(healthDefender.size()))
-	{
-		return healthDefender.back();
-	}
+	if (healthDefender.empty()) return 1.0f;
+	if (empireLevel < 0) return healthDefender.front();
+	if (empireLevel >= int(healthDefender.size())) return healthDefender.back();
 	return healthDefender[empireLevel];
 }
 
 float cSpaceCombatMetrics::GetTurretHealthByLevel(int empireLevel)
 {
-	if (healthTurret.empty())
-	{
-		return 1.0f;
-	}
-	if (empireLevel < 0)
-	{
-		return healthTurret[0];
-	}
-	if (empireLevel >= int(healthTurret.size()))
-	{
-		return healthTurret.back();
-	}
+	if (healthTurret.empty()) return 1.0f;
+	if (empireLevel < 0) return healthTurret.front();
+	if (empireLevel >= int(healthTurret.size())) return healthTurret.back();
 	return healthTurret[empireLevel];
 }
 
@@ -176,109 +140,71 @@ int cSpaceCombatMetrics::GetTurretsInT3()
 float cSpaceCombatMetrics::GetBomberHealthByEmpire(Simulator::cEmpire* empire)
 {
 	float baseHealth = GetBomberHealthByLevel(empire->GetWeaponryLevel());
-	if (empire == nullptr) {
-		return baseHealth;
-	}
+	if (empire == nullptr) return baseHealth;
 
+	// Динамический модификатор относительно уровня вооружения и агрессивности
+	float levelFactor = static_cast<float>(empire->GetWeaponryLevel() + 1) / 5.0f;
 	Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
-	float multiplier = 1.0f;
+
 	switch (baseArchetype) {
 		case Archetypes::kArchetypeWarrior:
 		case Archetypes::kArchetypeZealot:
 		case Archetypes::kArchetypeGrob:
-			multiplier = 1.25f; // Военные и Гроксы
-			break;
+			return baseHealth * (1.0f + (0.25f * levelFactor));
 		case Archetypes::kArchetypeScientist:
-			multiplier = 1.10f; // Ученые
-			break;
-		case Archetypes::kArchetypeTrader:
-		case Archetypes::kArchetypeEcologist:
-			multiplier = 1.00f; // Торговцы и Экологи
-			break;
-		case Archetypes::kArchetypeShaman:
-			multiplier = 0.85f; // Шаманы
-			break;
+			return baseHealth * (1.0f + (0.10f * levelFactor));
 		case Archetypes::kArchetypeBard:
 		case Archetypes::kArchetypeDiplomat:
-			multiplier = 0.75f; // Барды, Дипломаты, Странники
-			break;
+			return baseHealth * (1.0f - (0.20f * (1.0f - levelFactor * 0.5f)));
 		default:
-			multiplier = 1.00f;
-			break;
+			return baseHealth;
 	}
-	return baseHealth * multiplier;
 }
 
 float cSpaceCombatMetrics::GetFighterHealthByEmpire(Simulator::cEmpire* empire)
 {
 	float baseHealth = GetFighterHealthByLevel(empire->GetWeaponryLevel());
-	if (empire == nullptr) {
-		return baseHealth;
-	}
+	if (empire == nullptr) return baseHealth;
 
+	float levelFactor = static_cast<float>(empire->GetWeaponryLevel() + 1) / 5.0f;
 	Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
-	float multiplier = 1.0f;
+
 	switch (baseArchetype) {
 		case Archetypes::kArchetypeWarrior:
 		case Archetypes::kArchetypeZealot:
 		case Archetypes::kArchetypeGrob:
-			multiplier = 1.20f;
-			break;
+			return baseHealth * (1.0f + (0.20f * levelFactor));
 		case Archetypes::kArchetypeScientist:
-			multiplier = 1.10f;
-			break;
-		case Archetypes::kArchetypeTrader:
-		case Archetypes::kArchetypeEcologist:
-			multiplier = 1.00f;
-			break;
-		case Archetypes::kArchetypeShaman:
-			multiplier = 0.90f;
-			break;
+			return baseHealth * (1.0f + (0.10f * levelFactor));
 		case Archetypes::kArchetypeBard:
 		case Archetypes::kArchetypeDiplomat:
-			multiplier = 0.80f;
-			break;
+			return baseHealth * (1.0f - (0.15f * (1.0f - levelFactor * 0.5f)));
 		default:
-			multiplier = 1.00f;
-			break;
+			return baseHealth;
 	}
-	return baseHealth * multiplier;
 }
 
 float cSpaceCombatMetrics::GetDefenderHealthByEmpire(Simulator::cEmpire* empire)
 {
 	float baseHealth = GetDefenderHealthByLevel(empire->GetWeaponryLevel());
-	if (empire == nullptr) {
-		return baseHealth;
-	}
+	if (empire == nullptr) return baseHealth;
 
+	float levelFactor = static_cast<float>(empire->GetWeaponryLevel() + 1) / 5.0f;
 	Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
-	float multiplier = 1.0f;
+
 	switch (baseArchetype) {
 		case Archetypes::kArchetypeWarrior:
 		case Archetypes::kArchetypeZealot:
 		case Archetypes::kArchetypeGrob:
-			multiplier = 1.25f; // Защитники Воинов, Фанатиков и Гроксов крепче
-			break;
+			return baseHealth * (1.0f + (0.25f * levelFactor));
 		case Archetypes::kArchetypeScientist:
-			multiplier = 1.10f; // Защитники Ученых
-			break;
-		case Archetypes::kArchetypeTrader:
-		case Archetypes::kArchetypeEcologist:
-			multiplier = 1.00f; // Торговцы и Экологи
-			break;
-		case Archetypes::kArchetypeShaman:
-			multiplier = 0.85f; // Шаманы
-			break;
+			return baseHealth * (1.0f + (0.10f * levelFactor));
 		case Archetypes::kArchetypeBard:
 		case Archetypes::kArchetypeDiplomat:
-			multiplier = 0.75f; // Барды, Дипломаты, Странники
-			break;
+			return baseHealth * (1.0f - (0.20f * (1.0f - levelFactor * 0.5f)));
 		default:
-			multiplier = 1.00f;
-			break;
+			return baseHealth;
 	}
-	return baseHealth * multiplier;
 }
 
 float cSpaceCombatMetrics::GetTurretHealthByEmpire(Simulator::cEmpire* empire)
@@ -288,46 +214,45 @@ float cSpaceCombatMetrics::GetTurretHealthByEmpire(Simulator::cEmpire* empire)
 
 int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 {
-	if (planet == nullptr) {
-		return GetDefendersInColony();
-	}
+	if (planet == nullptr) return GetDefendersInColony();
+	if (planet->mType == PlanetType::T0) return GetDefendersInOutpost();
 
-	if (planet->mType == PlanetType::T0) {
-		return GetDefendersInOutpost();
-	}
+	int baseColonyDefenders = max(GetDefendersInColony(), 1);
+	int tierMultiplier = (planet->mType == PlanetType::T3) ? 3 : ((planet->mType == PlanetType::T2) ? 2 : 1);
 
 	cEmpire* empire = nullptr;
 	if (planet->GetStarRecord() != nullptr) {
 		empire = StarManager.GetEmpire(planet->GetStarRecord()->mEmpireID);
 	}
 
-	int baseDefenders = GetDefendersInColony();
-
+	float archetypeScale = 1.0f;
 	if (empire != nullptr) {
 		Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
 		switch (baseArchetype) {
 			case Archetypes::kArchetypeWarrior:
 			case Archetypes::kArchetypeZealot:
 			case Archetypes::kArchetypeGrob:
-				baseDefenders = (planet->mType == PlanetType::T3) ? 12 : ((planet->mType == PlanetType::T2) ? 8 : 5);
+				archetypeScale = 1.5f;
 				break;
 			case Archetypes::kArchetypeScientist:
 			case Archetypes::kArchetypeTrader:
-				baseDefenders = (planet->mType == PlanetType::T3) ? 8 : ((planet->mType == PlanetType::T2) ? 5 : 3);
+				archetypeScale = 1.15f;
 				break;
 			case Archetypes::kArchetypeEcologist:
-				baseDefenders = (planet->mType == PlanetType::T3) ? 6 : ((planet->mType == PlanetType::T2) ? 4 : 2);
+				archetypeScale = 1.0f;
 				break;
 			case Archetypes::kArchetypeShaman:
 			case Archetypes::kArchetypeBard:
 			case Archetypes::kArchetypeDiplomat:
 			default:
-				baseDefenders = (planet->mType == PlanetType::T3) ? 4 : ((planet->mType == PlanetType::T2) ? 3 : 2);
+				archetypeScale = 0.8f;
 				break;
 		}
 	}
 
-	// Учёт дополнительных колоний из Unlimited-Colony при нахождении в системе планеты
+	int baseDefenders = static_cast<int>(round(static_cast<float>(baseColonyDefenders * tierMultiplier) * archetypeScale));
+
+	// Поддержка Unlimited-Colony при нахождении в системе
 	if (GetCurrentContext() == SpaceContext::Planet && planet == GetActivePlanetRecord()) {
 		int cityCount = 0;
 		const auto& cities = Simulator::GetData<cCity>();
@@ -336,39 +261,36 @@ int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 		}
 		int standardCities = (planet->mType == PlanetType::T3) ? 3 : ((planet->mType == PlanetType::T2) ? 2 : 1);
 		if (cityCount > standardCities) {
-			baseDefenders += (cityCount - standardCities) * 3;
+			baseDefenders += (cityCount - standardCities) * baseColonyDefenders;
 		}
 	}
 
-	return baseDefenders;
+	return max(baseDefenders, 1);
 }
 
 int cSpaceCombatMetrics::GetTurretsInPlanet(Simulator::cPlanetRecord* planet)
 {
-	if (planet == nullptr) {
-		return 0;
-	}
+	if (planet == nullptr) return 0;
 
 	int baseTurrets = 0;
 	int standardCities = 1;
 	switch (planet->mType) {
-	case(PlanetType::T1):
-		baseTurrets = GetTurretsInT1();
-		standardCities = 1;
-		break;
-	case(PlanetType::T2):
-		baseTurrets = GetTurretsInT2();
-		standardCities = 2;
-		break;
-	case(PlanetType::T3):
-		baseTurrets = GetTurretsInT3();
-		standardCities = 3;
-		break;
-	default:
-		return 0;
+		case(PlanetType::T1):
+			baseTurrets = GetTurretsInT1();
+			standardCities = 1;
+			break;
+		case(PlanetType::T2):
+			baseTurrets = GetTurretsInT2();
+			standardCities = 2;
+			break;
+		case(PlanetType::T3):
+			baseTurrets = GetTurretsInT3();
+			standardCities = 3;
+			break;
+		default:
+			return 0;
 	}
 
-	// Учёт реальных турелей всех колоний из Unlimited-Colony при активном штурме
 	if (GetCurrentContext() == SpaceContext::Planet && planet == GetActivePlanetRecord()) {
 		int actualTurrets = 0;
 		int cityCount = 0;
