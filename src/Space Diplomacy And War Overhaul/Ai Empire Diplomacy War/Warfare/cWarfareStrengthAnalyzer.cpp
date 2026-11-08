@@ -2,14 +2,14 @@
 #include "cWarfareStrengthAnalyzer.h"
 
 #include <Spore-Mod-Utils/Include/SporeModUtils.h>
+#include <cmath>
 
 using namespace SporeModUtils;
 using namespace Simulator;
 
 cWarfareStrengthAnalyzer::cWarfareStrengthAnalyzer(cSimulationValidator* simulationValidator,
     cWarfareConfig* warfareConfig, 
-    cSpaceCombatMetrics* 
-    spaceCombatMetrics, 
+    cSpaceCombatMetrics* spaceCombatMetrics, 
     cArchetypeStrengthConfig* archetypeStrengthConfig)
 {
     this->simulationValidator = simulationValidator;
@@ -64,49 +64,50 @@ int cWarfareStrengthAnalyzer::GetBomberForceForPlanet(Simulator::cEmpire* empire
 
     // Модификатор штурмовой доктрины по философии атакующей империи
     float archetypeAssaultMultiplier = 1.0f;
-    if (empire != nullptr) {
-        Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
-        switch (baseArchetype) {
-            case Archetypes::kArchetypeWarrior:
-            case Archetypes::kArchetypeZealot:
-                archetypeAssaultMultiplier = 1.35f; // Военный кулак: подавление числом
-                break;
-            case Archetypes::kArchetypeScientist:
-                archetypeAssaultMultiplier = 0.85f; // Высокоточные хирургические удары
-                break;
-            case Archetypes::kArchetypeBard:
-            case Archetypes::kArchetypeShaman:
-            case Archetypes::kArchetypeDiplomat:
-                archetypeAssaultMultiplier = 0.75f; // Мирные архетипы отправляют минимальный эскорт
-                break;
-            default:
-                archetypeAssaultMultiplier = 1.0f;
-                break;
+    if (empire != nullptr && archetypeStrengthConfig != nullptr) {
+        float baseStr = archetypeStrengthConfig->GetArchetypeBaseStrength(empire->mArchetype);
+        if (baseStr > 1.0f) {
+            // Воинственные фракции (Воины, Фанатики) получают бонус к штурму
+            archetypeAssaultMultiplier = baseStr;
+        } else if (baseStr < 1.0f && baseStr > 0.0f) {
+            // Мирные фракции отправляют минимальный расчетный эскорт
+            archetypeAssaultMultiplier = baseStr;
         }
     }
 
     int requiredBombers = static_cast<int>(round(rawRequired * archetypeAssaultMultiplier));
     int maxBombers = warfareConfig->GetMaxBombersInRaid();
 
-    // 1. Относительное масштабирование для столиц (без хардкодных цифр)
+    // 1. Относительное масштабирование для столиц от пользовательского конфига
     if (PlanetUtils::Homeworld(planet)) {
         maxBombers = static_cast<int>(round(static_cast<float>(maxBombers) * 1.6f));
     }
 
-    // 2. Эластичный мягкий потолок рейда вместо жесткого min()
+    // 2. Эластичный мягкий потолок рейда (Soft-Cap) вместо жесткого обрезания
     if (requiredBombers > maxBombers) {
         float excess = static_cast<float>(requiredBombers - maxBombers);
         requiredBombers = maxBombers + static_cast<int>(round(sqrt(excess) * 2.0f));
     }
 
-    return requiredBombers;
+    return max(requiredBombers, 1);
 }
 
+int cWarfareStrengthAnalyzer::GetBomberForceForSystem(Simulator::cEmpire* empire, Simulator::cStarRecord* star){
+    if (!simulationValidator->ValidStar(star)) {
+        return 0;
+    }
+    int requiredBombers = 0;
+    for (cPlanetRecordPtr planet : star->GetPlanetRecords()) {
+        if (planet->GetTechLevel() == TechLevel::Empire) {
+            requiredBombers += GetBomberForceForPlanet(empire, planet.get());
+        }
+    }
+    return requiredBombers;
+}
 
 float cWarfareStrengthAnalyzer::GetBombersProducedByFactory(ResourceKey spiceKey){
     float cheapestSpiceCost = SpiceUtils::GetSpiceBaseCost(SpiceUtils::GetCheapestSpice(spiceCosts), spiceCosts);
     float spiceCost = SpiceUtils::GetSpiceBaseCost(spiceKey, spiceCosts);
-    // Defaults to the cheapest spice if the given spice is not valid.
     if (spiceCost == 0) {
         spiceCost = cheapestSpiceCost;
     }
@@ -130,7 +131,7 @@ int cWarfareStrengthAnalyzer::GetFactoryCountInPlanet(Simulator::cPlanetRecord* 
         return 0;
     }
 
-    // Если планета активна, считаем фактическое число городов из Unlimited-Colony
+    // Динамический подсчет фактических колоний из Unlimited-Colony
     int actualColonies = baseColonies;
     if (GetCurrentContext() == SpaceContext::Planet && planet == GetActivePlanetRecord()) {
         int loadedCities = 0;
@@ -154,8 +155,6 @@ int cWarfareStrengthAnalyzer::GetFactoryCountInPlanet(Simulator::cPlanetRecord* 
     int totalBuildings = actualColonies * buildingsPerColony;
     return max(totalBuildings / warfareConfig->GetBuildingsPerFactoryRatio(), 1);
 }
-
-
 
 float cWarfareStrengthAnalyzer::GetBombersProducedByPlanet(Simulator::cPlanetRecord* planet){
     if (planet->GetTechLevel() == TechLevel::Empire) {
@@ -187,7 +186,6 @@ float cWarfareStrengthAnalyzer::AdjustBombersForCaps(float bomberCount) {
 
     return bomberCount;
 }
-
 
 float cWarfareStrengthAnalyzer::GetBombersProducedByEmpire(Simulator::cEmpire* empire){
     float bombersProduced = 0;
