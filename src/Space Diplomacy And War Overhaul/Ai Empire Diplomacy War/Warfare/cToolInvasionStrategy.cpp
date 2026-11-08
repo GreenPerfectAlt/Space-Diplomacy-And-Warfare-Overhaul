@@ -1,6 +1,8 @@
 #include "stdafx.h"
 #include "cToolInvasionStrategy.h"
 #include <Spore-Mod-Utils/Include/SporeModUtils.h>
+#include <cmath>
+
 using namespace SporeModUtils;
 using namespace Simulator;
 
@@ -16,31 +18,9 @@ cToolInvasionStrategy::cToolInvasionStrategy()
 	App::Property::GetInt32(toolInvasionProp.get(), 0x10609EDF, useCost);
 }
 
-
 cToolInvasionStrategy::~cToolInvasionStrategy()
 {
 }
-/*
-// For internal use, do not modify.
-int cToolInvasionStrategy::AddRef()
-{
-	return DefaultRefCounted::AddRef();
-}
-
-// For internal use, do not modify.
-int cToolInvasionStrategy::Release()
-{
-	return DefaultRefCounted::Release();
-}
-
-// You can extend this function to return any other types your class implements.
-void* cToolInvasionStrategy::Cast(uint32_t type) const
-{
-	CLASS_CAST(Object);
-	CLASS_CAST(cToolInvasionStrategy);
-	return nullptr;
-}
-*/
 
 bool cToolInvasionStrategy::OnSelect(Simulator::cSpaceToolData* pTool) {
 	if (!Update(pTool, true)) return false;
@@ -51,34 +31,31 @@ bool cToolInvasionStrategy::OnSelect(Simulator::cSpaceToolData* pTool) {
 	bool inPlanetOrSystem = context == SpaceContext::Planet || context == SpaceContext::SolarSystem;
 	int beforeUsingToolMoney = playerEmpire->mEmpireMoney;
 
-	// OnSelect tries to charge the player for the tool.
-	// If the balance doesn�t change, the player can�t afford it,
-	// so we exit early without summoning the fleet.
-	if (!cToolStrategy::OnSelect(pTool) || beforeUsingToolMoney == playerEmpire->mEmpireMoney  ) return false;
+	// OnSelect списывает стоимость вызова флота
+	if (!cToolStrategy::OnSelect(pTool) || beforeUsingToolMoney == playerEmpire->mEmpireMoney) return false;
 
 	if (inGalaxy && simulationValidator->ValidStar(GetActiveStarRecord())) {
 		for (cPlanetRecordPtr planet : GetActiveStarRecord()->GetPlanetRecords()) {
 			if (simulationValidator->ValidPlanet(planet.get()) && planet->GetTechLevel() == TechLevel::Empire) {
+				int bombers = warfareStrengthAnalyzer->GetBomberForceForPlanet(playerEmpire, planet.get());
 				warfareEventDispatcher->DispatchPlanetAttackedEvent(
 					playerEmpire,
 					planet.get(),
-					warfareStrengthAnalyzer->GetBomberForceForPlanet(playerEmpire, planet.get())
+					bombers
 				);
 			}
 		}
 	}
-
 	else if (inPlanetOrSystem && simulationValidator->ValidPlanet(GetActivePlanetRecord())) {
+		int bombers = warfareStrengthAnalyzer->GetBomberForceForPlanet(playerEmpire, GetActivePlanetRecord());
 		warfareEventDispatcher->DispatchPlanetAttackedEvent(
 			playerEmpire,
 			GetActivePlanetRecord(),
-			warfareStrengthAnalyzer->GetBomberForceForPlanet(playerEmpire, GetActivePlanetRecord())
+			bombers
 		);
 	}
 
-
 	return true;
-
 }
 
 bool cToolInvasionStrategy::Update(Simulator::cSpaceToolData* pTool, bool showErrors, const char16_t** ppFailText) {
@@ -114,7 +91,7 @@ bool cToolInvasionStrategy::Update(Simulator::cSpaceToolData* pTool, bool showEr
 	return true;
 }
 
-int cToolInvasionStrategy::ProcessCost(int useCost) {
+int cToolInvasionStrategy::ProcessCost(int baseUseCost) {
 	if (warfareStrengthAnalyzer == nullptr) {
 		return 0;
 	}
@@ -124,14 +101,60 @@ int cToolInvasionStrategy::ProcessCost(int useCost) {
 	bool inGalaxy = context == SpaceContext::Galaxy;
 	bool inPlanetOrSystem = context == SpaceContext::Planet || context == SpaceContext::SolarSystem;
 
-	if (inGalaxy && simulationValidator->ValidStar(GetActiveStarRecord())) {
-		bombersNeeded = warfareStrengthAnalyzer->GetBomberForceForSystem(GetPlayerEmpire(), GetActiveStarRecord());
+	cEmpire* playerEmpire = GetPlayerEmpire();
+	cStarRecord* targetStar = GetActiveStarRecord();
+
+	if (inGalaxy && simulationValidator->ValidStar(targetStar)) {
+		bombersNeeded = warfareStrengthAnalyzer->GetBomberForceForSystem(playerEmpire, targetStar);
 	}
 	else if (inPlanetOrSystem && simulationValidator->ValidPlanet(GetActivePlanetRecord())) {
-		bombersNeeded = warfareStrengthAnalyzer->GetBomberForceForPlanet(GetPlayerEmpire(), GetActivePlanetRecord());
+		bombersNeeded = warfareStrengthAnalyzer->GetBomberForceForPlanet(playerEmpire, GetActivePlanetRecord());
 	}
 
-	return useCost * bombersNeeded;
+	if (bombersNeeded <= 0) {
+		return 0;
+	}
+
+	// 1. Модификатор стоимости по философии (архетипу) игрока
+	float archetypeCostMultiplier = 1.0f;
+	if (playerEmpire != nullptr) {
+		Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(playerEmpire->mArchetype);
+		switch (baseArchetype) {
+			case Archetypes::kArchetypeTrader:
+				archetypeCostMultiplier = 0.75f; // Скидка 25% торговцам
+				break;
+			case Archetypes::kArchetypeWarrior:
+				archetypeCostMultiplier = 0.85f; // Скидка 15% воинам и рыцарям
+				break;
+			case Archetypes::kArchetypeBard:
+			case Archetypes::kArchetypeShaman:
+			case Archetypes::kArchetypeDiplomat:
+				archetypeCostMultiplier = 1.25f; // Наценка 25% мирным империям
+				break;
+			default:
+				archetypeCostMultiplier = 1.0f;
+				break;
+		}
+	}
+
+	// 2. Логистическая надбавка за расстояние от родного мира
+	float distancePenaltyMultiplier = 1.0f;
+	if (playerEmpire != nullptr && targetStar != nullptr) {
+		cStarRecord* homeworld = EmpireUtils::GetHomeStar(playerEmpire);
+		if (homeworld != nullptr) {
+			float distance = StarUtils::GetDistanceBetweenStars(homeworld, targetStar);
+			const float baseSupplyRange = 15.0f;
+			if (distance > baseSupplyRange) {
+				// +2% к стоимости за каждый парсек свыше 15 пк
+				distancePenaltyMultiplier += (distance - baseSupplyRange) * 0.02f;
+			}
+		}
+	}
+
+	float finalUnitCost = static_cast<float>(baseUseCost) * archetypeCostMultiplier * distancePenaltyMultiplier;
+	int totalCost = static_cast<int>(round(finalUnitCost * static_cast<float>(bombersNeeded)));
+
+	return max(totalCost, baseUseCost);
 }
 
 void cToolInvasionStrategy::InjectDependencies(cSimulationValidator* simulationValidator, cWarfareStrengthAnalyzer* warfareStrengthAnalyzer, cWarfareEventDispatcher* warfareEventDispatcher)
