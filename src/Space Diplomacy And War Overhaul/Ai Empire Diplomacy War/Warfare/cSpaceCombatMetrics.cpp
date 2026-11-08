@@ -247,17 +247,12 @@ int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 		return GetDefendersInColony();
 	}
 
-	int baseDefenders = (planet->mType == PlanetType::T0) ? GetDefendersInOutpost() : GetDefendersInColony();
-	int expectedColonies = (planet->mType == PlanetType::T0) ? 1 : ((planet->mType == PlanetType::T1) ? 1 : ((planet->mType == PlanetType::T2) ? 2 : 3));
-
-	// Масштабирование гарнизона под Unlimited-Colony
-	if (planet->GetPlanetView() && !planet->GetPlanetView()->mColonies.empty()) {
-		int actualColonies = static_cast<int>(planet->GetPlanetView()->mColonies.size());
-		if (actualColonies > expectedColonies) {
-			baseDefenders += (actualColonies - expectedColonies) * 2;
-		}
+	if (planet->mType == PlanetType::T0) {
+		return GetDefendersInOutpost();
 	}
-	return baseDefenders;
+	else {
+		return GetDefendersInColony();
+	}
 }
 
 int cSpaceCombatMetrics::GetTurretsInPlanet(Simulator::cPlanetRecord* planet)
@@ -266,32 +261,19 @@ int cSpaceCombatMetrics::GetTurretsInPlanet(Simulator::cPlanetRecord* planet)
 		return 0;
 	}
 
-	int baseTurrets = 0;
-	int expectedColonies = 1;
 	switch (planet->mType) {
-		case(PlanetType::T1):
-			baseTurrets = GetTurretsInT1();
-			expectedColonies = 1;
-			break;
-		case(PlanetType::T2):
-			baseTurrets = GetTurretsInT2();
-			expectedColonies = 2;
-			break;
-		case(PlanetType::T3):
-			baseTurrets = GetTurretsInT3();
-			expectedColonies = 3;
-			break;
-		default:
-			return 0;
+	case(PlanetType::T1): {
+		return GetTurretsInT1();
 	}
-
-	// Масштабирование турелей под Unlimited-Colony (дополнительные города добавляют башни к расчету обороны)
-	if (planet->GetPlanetView() && !planet->GetPlanetView()->mColonies.empty()) {
-		int actualColonies = static_cast<int>(planet->GetPlanetView()->mColonies.size());
-		if (actualColonies > expectedColonies) {
-			int turretsPerColony = max(baseTurrets / expectedColonies, 4);
-			baseTurrets += (actualColonies - expectedColonies) * turretsPerColony;
-		}
+	case(PlanetType::T2): {
+		return GetTurretsInT2();
 	}
-	return baseTurrets;
+	case(PlanetType::T3): {
+		return GetTurretsInT3();
+	}
+	default: {
+		return 0;
+	}
+	}
 }
+
