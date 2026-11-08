@@ -51,7 +51,6 @@ cSpaceCombatMetrics::cSpaceCombatMetrics(ResourceKey spaceCombatKey)
 	numTurretsInT3 = min((numBuildingsT3 / 2) * 3, 24);
 }
 
-
 cSpaceCombatMetrics::~cSpaceCombatMetrics()
 {
 }
@@ -176,12 +175,60 @@ int cSpaceCombatMetrics::GetTurretsInT3()
 
 float cSpaceCombatMetrics::GetBomberHealthByEmpire(Simulator::cEmpire* empire)
 {
-	return GetBomberHealthByLevel(empire->GetWeaponryLevel());
+	float baseHealth = GetBomberHealthByLevel(empire->GetWeaponryLevel());
+	if (empire == nullptr) {
+		return baseHealth;
+	}
+
+	Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
+	float multiplier = 1.0f;
+	switch (baseArchetype) {
+		case Archetypes::kArchetypeWarrior:
+		case Archetypes::kArchetypeZealot:
+			multiplier = 1.25f; // Военная броня
+			break;
+		case Archetypes::kArchetypeScientist:
+			multiplier = 1.10f; // Технологические щиты
+			break;
+		case Archetypes::kArchetypeBard:
+		case Archetypes::kArchetypeShaman:
+		case Archetypes::kArchetypeDiplomat:
+			multiplier = 0.75f; // Облегченные корпуса
+			break;
+		default:
+			multiplier = 1.00f; // Торговцы, Экологи и база
+			break;
+	}
+	return baseHealth * multiplier;
 }
 
 float cSpaceCombatMetrics::GetFighterHealthByEmpire(Simulator::cEmpire* empire)
 {
-	return GetFighterHealthByLevel(empire->GetWeaponryLevel());
+	float baseHealth = GetFighterHealthByLevel(empire->GetWeaponryLevel());
+	if (empire == nullptr) {
+		return baseHealth;
+	}
+
+	Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
+	float multiplier = 1.0f;
+	switch (baseArchetype) {
+		case Archetypes::kArchetypeWarrior:
+		case Archetypes::kArchetypeZealot:
+			multiplier = 1.20f;
+			break;
+		case Archetypes::kArchetypeScientist:
+			multiplier = 1.10f;
+			break;
+		case Archetypes::kArchetypeBard:
+		case Archetypes::kArchetypeShaman:
+		case Archetypes::kArchetypeDiplomat:
+			multiplier = 0.80f;
+			break;
+		default:
+			multiplier = 1.00f;
+			break;
+	}
+	return baseHealth * multiplier;
 }
 
 float cSpaceCombatMetrics::GetDefenderHealthByEmpire(Simulator::cEmpire* empire)
@@ -196,30 +243,55 @@ float cSpaceCombatMetrics::GetTurretHealthByEmpire(Simulator::cEmpire* empire)
 
 int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 {
-	if (planet->mType == PlanetType::T0) {
-		return GetDefendersInOutpost();
-	}
-	else {
+	if (planet == nullptr) {
 		return GetDefendersInColony();
 	}
+
+	int baseDefenders = (planet->mType == PlanetType::T0) ? GetDefendersInOutpost() : GetDefendersInColony();
+	int expectedColonies = (planet->mType == PlanetType::T0) ? 1 : ((planet->mType == PlanetType::T1) ? 1 : ((planet->mType == PlanetType::T2) ? 2 : 3));
+
+	// Масштабирование гарнизона под Unlimited-Colony
+	if (planet->GetPlanetView() && !planet->GetPlanetView()->mColonies.empty()) {
+		int actualColonies = static_cast<int>(planet->GetPlanetView()->mColonies.size());
+		if (actualColonies > expectedColonies) {
+			baseDefenders += (actualColonies - expectedColonies) * 2;
+		}
+	}
+	return baseDefenders;
 }
 
 int cSpaceCombatMetrics::GetTurretsInPlanet(Simulator::cPlanetRecord* planet)
 {
-	switch (planet->mType) {
-	case(PlanetType::T1): {
-		return GetTurretsInT1();
-	}
-	case(PlanetType::T2): {
-		return GetTurretsInT2();
-	}
-	case(PlanetType::T3): {
-		return GetTurretsInT3();
-	}
-	default: {
+	if (planet == nullptr) {
 		return 0;
 	}
+
+	int baseTurrets = 0;
+	int expectedColonies = 1;
+	switch (planet->mType) {
+		case(PlanetType::T1):
+			baseTurrets = GetTurretsInT1();
+			expectedColonies = 1;
+			break;
+		case(PlanetType::T2):
+			baseTurrets = GetTurretsInT2();
+			expectedColonies = 2;
+			break;
+		case(PlanetType::T3):
+			baseTurrets = GetTurretsInT3();
+			expectedColonies = 3;
+			break;
+		default:
+			return 0;
 	}
+
+	// Масштабирование турелей под Unlimited-Colony (дополнительные города добавляют башни к расчету обороны)
+	if (planet->GetPlanetView() && !planet->GetPlanetView()->mColonies.empty()) {
+		int actualColonies = static_cast<int>(planet->GetPlanetView()->mColonies.size());
+		if (actualColonies > expectedColonies) {
+			int turretsPerColony = max(baseTurrets / expectedColonies, 4);
+			baseTurrets += (actualColonies - expectedColonies) * turretsPerColony;
+		}
+	}
+	return baseTurrets;
 }
-
-
