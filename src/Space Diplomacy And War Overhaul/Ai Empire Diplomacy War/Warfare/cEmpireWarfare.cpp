@@ -118,18 +118,24 @@ void cEmpireWarfare::CalculateAttackPriorities() {
 int cEmpireWarfare::GetEmpireBomberForceForPlanet(Simulator::cPlanetRecord* planet) {
 	int requiredBombers = warfareStrengthAnalyzer->GetBomberForceForPlanet(this->empire.get(), planet);
 
+	// Штраф за одновременную атаку нескольких планет
 	float multiAttackPenalty = warfareConfig->GetBombersMultiPlanetPenaltyFactor() * log(static_cast<float>(attackedPlanets) + 1.0f);
 	requiredBombers += static_cast<int>(round(static_cast<float>(requiredBombers) * multiAttackPenalty));
 
-	// Логистика, привязанная к радиусу империи warfareRange вместо хардкода 15.0f
+	// Логистический штраф: радиус рассчитывается динамически от дальности вооружения империи
 	cStarRecord* homeworld = EmpireUtils::GetHomeStar(empire.get());
 	if (homeworld != nullptr && planet->GetStarRecord() != nullptr) {
 		float distanceToTarget = StarUtils::GetDistanceBetweenStars(homeworld, planet->GetStarRecord());
-		float effectiveSupplyRange = max(warfareConfig->GetWarfareRange(empire->GetWeaponryLevel()) * 0.5f, 5.0f);
+		float baseLogisticsRange = warfareConfig->GetWarfareRange(empire->GetWeaponryLevel());
+		if (baseLogisticsRange <= 0.0f) {
+			baseLogisticsRange = 10.0f;
+		}
 
-		if (distanceToTarget > effectiveSupplyRange) {
-			float logisticsPenaltyRatio = (distanceToTarget - effectiveSupplyRange) / effectiveSupplyRange;
-			requiredBombers += static_cast<int>(round(static_cast<float>(requiredBombers) * logisticsPenaltyRatio * 0.25f));
+		if (distanceToTarget > baseLogisticsRange) {
+			// Шаг штрафа привязан к коэффициенту мульти-атак из пользовательского конфига
+			float logisticsStep = warfareConfig->GetBombersMultiPlanetPenaltyFactor() * 0.1f;
+			float logisticsPenaltyRatio = (distanceToTarget - baseLogisticsRange) * logisticsStep;
+			requiredBombers += static_cast<int>(round(static_cast<float>(requiredBombers) * logisticsPenaltyRatio));
 		}
 	}
 
@@ -202,18 +208,19 @@ void cEmpireWarfare::SelectAndAttackTargets() {
 		float bombersToAttackTarget = static_cast<float>(warfareStrengthAnalyzer->GetBomberForceForSystem(empire.get(), bestTarget.get()));
 		attackPriorityMap.erase(bestIt);
 
-		// Экономическая мобилизация через динамическую цену
-		if (bombersToAttackTarget > currentBombers && empire->mEmpireMoney >= dynamicUnitCost) {
+		// Экономическая мобилизация: стоимость привязана к коэффициенту производства фабрик
+		int bomberUnitCost = max(static_cast<int>(round(1000.0f / max(warfareConfig->GetBombersPerRedSpiceFactory(), 0.1f))), 250);
+		if (bombersToAttackTarget > currentBombers && empire->mEmpireMoney >= bomberUnitCost) {
 			int missingBombers = static_cast<int>(ceil(bombersToAttackTarget - currentBombers));
-			int affordableBombers = empire->mEmpireMoney / dynamicUnitCost;
+			int affordableBombers = empire->mEmpireMoney / bomberUnitCost;
 			int purchasedBombers = min(missingBombers, affordableBombers);
 
 			if (purchasedBombers > 0) {
 				currentBombers += static_cast<float>(purchasedBombers);
-				empire->mEmpireMoney -= purchasedBombers * dynamicUnitCost;
+				empire->mEmpireMoney -= purchasedBombers * bomberUnitCost;
 			}
 		}
-
+		
 		if (bombersToAttackTarget > currentBombers) {
 			float pOfAttack = currentBombers / bombersToAttackTarget;
 			float n = Math::randf();
