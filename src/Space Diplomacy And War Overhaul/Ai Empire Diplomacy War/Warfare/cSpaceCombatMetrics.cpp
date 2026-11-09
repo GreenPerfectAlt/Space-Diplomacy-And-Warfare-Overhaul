@@ -214,45 +214,52 @@ float cSpaceCombatMetrics::GetTurretHealthByEmpire(Simulator::cEmpire* empire)
 
 int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 {
-	if (planet == nullptr) return GetDefendersInColony();
-	if (planet->mType == PlanetType::T0) return GetDefendersInOutpost();
+	if (planet == nullptr) {
+		return GetDefendersInColony();
+	}
 
-	int baseColonyDefenders = max(GetDefendersInColony(), 1);
-	int tierMultiplier = (planet->mType == PlanetType::T3) ? 3 : ((planet->mType == PlanetType::T2) ? 2 : 1);
+	if (planet->mType == PlanetType::T0) {
+		return GetDefendersInOutpost();
+	}
 
 	cEmpire* empire = nullptr;
 	if (planet->GetStarRecord() != nullptr) {
 		empire = StarManager.GetEmpire(planet->GetStarRecord()->mEmpireID);
 	}
 
-	float archetypeScale = 1.0f;
+	int baseColonyDefenders = GetDefendersInColony();
+	int baseDefenders = baseColonyDefenders;
+
 	if (empire != nullptr) {
 		Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
+		float archetypeMultiplier = 1.0f;
+
 		switch (baseArchetype) {
 			case Archetypes::kArchetypeWarrior:
 			case Archetypes::kArchetypeZealot:
 			case Archetypes::kArchetypeGrob:
-				archetypeScale = 1.5f;
+				archetypeMultiplier = 2.5f; // Воинственные фракции масштабируют базовый гарнизон
 				break;
 			case Archetypes::kArchetypeScientist:
 			case Archetypes::kArchetypeTrader:
-				archetypeScale = 1.15f;
+				archetypeMultiplier = 1.6f;
 				break;
 			case Archetypes::kArchetypeEcologist:
-				archetypeScale = 1.0f;
+				archetypeMultiplier = 1.2f;
 				break;
 			case Archetypes::kArchetypeShaman:
 			case Archetypes::kArchetypeBard:
 			case Archetypes::kArchetypeDiplomat:
 			default:
-				archetypeScale = 0.8f;
+				archetypeMultiplier = 0.8f;
 				break;
 		}
+
+		float tScoreFactor = (planet->mType == PlanetType::T3) ? 1.5f : ((planet->mType == PlanetType::T2) ? 1.0f : 0.6f);
+		baseDefenders = max(static_cast<int>(round(static_cast<float>(baseColonyDefenders) * archetypeMultiplier * tScoreFactor)), 2);
 	}
 
-	int baseDefenders = static_cast<int>(round(static_cast<float>(baseColonyDefenders * tierMultiplier) * archetypeScale));
-
-	// Поддержка Unlimited-Colony при нахождении в системе
+	// Учет реальных колоний Unlimited-Colony
 	if (GetCurrentContext() == SpaceContext::Planet && planet == GetActivePlanetRecord()) {
 		int cityCount = 0;
 		const auto& cities = Simulator::GetData<cCity>();
@@ -261,12 +268,13 @@ int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 		}
 		int standardCities = (planet->mType == PlanetType::T3) ? 3 : ((planet->mType == PlanetType::T2) ? 2 : 1);
 		if (cityCount > standardCities) {
-			baseDefenders += (cityCount - standardCities) * baseColonyDefenders;
+			baseDefenders += (cityCount - standardCities) * max(baseColonyDefenders / 2, 1);
 		}
 	}
 
-	return max(baseDefenders, 1);
+	return baseDefenders;
 }
+
 
 int cSpaceCombatMetrics::GetTurretsInPlanet(Simulator::cPlanetRecord* planet)
 {
