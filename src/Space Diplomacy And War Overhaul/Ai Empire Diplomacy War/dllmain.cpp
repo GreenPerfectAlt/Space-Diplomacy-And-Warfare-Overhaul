@@ -29,10 +29,6 @@
 using namespace SporeModUtils;
 using namespace Simulator;
 
-namespace {
-	bool gIsSpawningExtraNpcDefenders = false;
-}
-
 void Initialize()
 {
 	// CheatManager.AddCheat("DebugDiplomacy", new DebugDiplomacy());
@@ -46,7 +42,7 @@ void Initialize()
 	ClassManager.AddFactory(new cPersistedObjectFactory());
 	ClassManager.AddFactory(new cPersistenceStateFactory());
 	ClassManager.AddFactory(new cPersistedEventFactory());
-	ClassManager.AddFactory(new cPersistedDiplomacyEventFactory);
+	ClassManager.AddFactory(new cPersistedDiplomacyEventFactory());
 	ClassManager.AddFactory(new cNeighborsInPeaceEventFactory());
 	ClassManager.AddFactory(new cMadePeaceEventFactory());
 	ClassManager.AddFactory(new cUpliftedByMonolithEventFactory());
@@ -60,7 +56,11 @@ void Dispose()
 	// This method is called when the game is closing
 }
 
-/// Prevent cosmetic galaxy Raider UFO crashes
+/// When an empire raids the system of another empire and the player is in the galactic view,
+/// a UFO spawns in a system of the first empire and travels to the target system.
+/// This is entirely cosmetic and can cause a crash in some, yet to be determined, circumstances.
+/// This is the method that controls whether to spawn that UFO or not, we always return false
+/// to prevent those UFOs from spawning and avoid that crash.
 member_detour(ShouldSpawnRaiderUFO__detour, cRaidEvent, bool())
 {
 	bool detoured()
@@ -70,46 +70,43 @@ member_detour(ShouldSpawnRaiderUFO__detour, cRaidEvent, bool())
 	}
 };
 
-/// Применяет реальные ХП по философии (Воины, Ученые, Барды и т.д.) ко всем создаваемым НЛО в бою,
-/// не перезаписывая защитников игрока (чтобы не конфликтовать с модом Defensive Ships In Player Colonies).
+static bool sIsSpawningExtraNpcDefenders = false;
+
 static_detour(SpawnUFO__detour, cGameDataUFO*(UfoType, int*, ResourceKey*))
 {
 	cGameDataUFO* detoured(UfoType ufoType, int* pPoliticalID, ResourceKey* pUfoKey)
 	{
 		cGameDataUFO* ufo = original_function(ufoType, pPoliticalID, pUfoKey);
-		if (!IsSpaceGame() || ufo == nullptr || pPoliticalID == nullptr) {
+		if (!ufo || !IsSpaceGame() || !pPoliticalID || *pPoliticalID == 0) {
 			return ufo;
 		}
 
 		cCompositionRoot* root = cCompositionRoot::Get();
-		if (root == nullptr || root->spaceCombatMetrics == nullptr) {
+		if (!root || !root->spaceCombatMetrics) {
 			return ufo;
 		}
 
-		uint32_t polID = static_cast<uint32_t>(*pPoliticalID);
-		if (polID == 0 || polID == 0xFFFFFFFF) {
+		uint32_t politicalID = static_cast<uint32_t>(*pPoliticalID);
+		cEmpire* ownerEmpire = StarManager.GetEmpire(politicalID);
+		if (!ownerEmpire) {
 			return ufo;
 		}
 
-		// Защитников на планетах игрока оставляем под управлением первого мода (Defensive Ships In Player Colonies)
-		if (ufoType == UfoType::Defender && polID == GetPlayerEmpireID()) {
-			return ufo;
-		}
-
-		cEmpire* ownerEmpire = StarManager.GetEmpire(polID);
-		if (ownerEmpire == nullptr) {
+		// Do not override player defenders so Defensive Ships In Player Colonies handles them natively
+		if (ufoType == UfoType::Defender && ownerEmpire == GetPlayerEmpire()) {
 			return ufo;
 		}
 
 		float customHP = 0.0f;
-		if (ufoType == UfoType::Bomber || ufoType == UfoType::Raider) {
+		int typeInt = static_cast<int>(ufoType);
+		if (ufoType == UfoType::Bomber) {
 			customHP = root->spaceCombatMetrics->GetBomberHealthByEmpire(ownerEmpire);
-		}
-		else if (ufoType == UfoType::Fighter) {
-			customHP = root->spaceCombatMetrics->GetFighterHealthByEmpire(ownerEmpire);
 		}
 		else if (ufoType == UfoType::Defender) {
 			customHP = root->spaceCombatMetrics->GetDefenderHealthByEmpire(ownerEmpire);
+		}
+		else if (typeInt == 4 || typeInt == 3) { // Raider / Fighter escort in UfoType enum
+			customHP = root->spaceCombatMetrics->GetFighterHealthByEmpire(ownerEmpire);
 		}
 
 		if (customHP > 1.0f) {
@@ -121,68 +118,65 @@ static_detour(SpawnUFO__detour, cGameDataUFO*(UfoType, int*, ResourceKey*))
 	}
 };
 
-/// Спавнит реальный усиленный гарнизон защитников на планетах ИИ-империй (Воины, Ученые, Столицы и т.д.),
-/// когда игрок залетает на орбиту вражеской или союзной NPC-планеты.
 member_detour(GenerateNpcPlanetDefenders__detour, cSimPlanetHighLOD, void(cPlanet* planet))
 {
 	void detoured(cPlanet* planet)
 	{
 		original_function(this, planet);
 
-		if (!IsSpaceGame() || gIsSpawningExtraNpcDefenders || planet == nullptr || planet->mpPlanetRecord == nullptr) {
+		if (!IsSpaceGame() || sIsSpawningExtraNpcDefenders || !planet || !planet->mpPlanetRecord) {
 			return;
 		}
 
 		cEmpire* planetEmpire = planet->GetEmpire();
-		if (planetEmpire == nullptr || planetEmpire == GetPlayerEmpire()) {
-			return; // Планеты игрока обрабатывает мод Defensive Ships In Player Colonies
-		}
-
-		cPlanetRecord* planetRec = planet->mpPlanetRecord.get();
-		if (planetRec->GetTechLevel() != TechLevel::Empire) {
+		if (!planetEmpire || planetEmpire == GetPlayerEmpire()) {
 			return;
 		}
 
 		cCompositionRoot* root = cCompositionRoot::Get();
-		if (root == nullptr || root->spaceCombatMetrics == nullptr) {
+		if (!root || !root->spaceCombatMetrics || !root->simulationValidator) {
 			return;
 		}
 
-		int desiredDefenders = root->spaceCombatMetrics->GetDefendersInPlanet(planetRec);
+		if (!root->simulationValidator->ValidEmpire(planetEmpire, false, true)) {
+			return;
+		}
 
-		// Считаем, сколько ванильных защитников этой империи уже успела создать игра при входе на планету
+		int targetDefenders = root->spaceCombatMetrics->GetDefendersInPlanet(planet->mpPlanetRecord.get());
+		if (targetDefenders <= 0) {
+			return;
+		}
+
+		// Cap orbital entities to protect framerate
+		if (targetDefenders > 24) {
+			targetDefenders = 24;
+		}
+
 		int existingDefenders = 0;
 		const auto& ufos = GetData<cGameDataUFO>();
 		for (const auto& ufo : ufos) {
-			if (ufo != nullptr && ufo->mHealthPoints > 0 &&
-			    ufo->mPoliticalID == planetEmpire->mPoliticalID &&
-			    ufo->mUFOType == static_cast<int>(UfoType::Defender)) {
+			if (ufo && ufo->mHealthPoints > 0 &&
+				ufo->mPoliticalID == planetEmpire->GetEmpireID() &&
+				ufo->mUFOType == static_cast<int>(UfoType::Defender)) {
 				existingDefenders++;
 			}
 		}
 
-		int toSpawn = desiredDefenders - existingDefenders;
+		int toSpawn = targetDefenders - existingDefenders;
 		if (toSpawn > 0) {
-			// Ограничиваем разовый спавн на орбите разумным пределом для FPS
-			if (toSpawn > 20) toSpawn = 20;
-
-			gIsSpawningExtraNpcDefenders = true;
+			sIsSpawningExtraNpcDefenders = true;
 			int* pPolID = &planetEmpire->mPoliticalID;
-			ResourceKey* pUfoKey = &planetEmpire->mUFOKey;
-
+			ResourceKey* pKey = &planetEmpire->mUFOKey;
 			for (int i = 0; i < toSpawn; ++i) {
-				STATIC_CALL(
-					Address(ModAPI::ChooseAddress(0x0102bbb0, 0x0102acc0)),
+				STATIC_CALL(Address(ModAPI::ChooseAddress(0x0102bbb0, 0x0102acc0)),
 					cGameDataUFO*,
 					Args(UfoType, int*, ResourceKey*),
-					Args(UfoType::Defender, pPolID, pUfoKey)
-				);
+					Args(UfoType::Defender, pPolID, pKey));
 			}
-			gIsSpawningExtraNpcDefenders = false;
+			sIsSpawningExtraNpcDefenders = false;
 		}
 	}
 };
-
 
 void AttachDetours()
 {
@@ -195,7 +189,6 @@ void AttachDetours()
 	ShowEvent__detour::attach(GetAddress(cUIEventLog, ShowEvent));
 	EmpireDestroyed__detour::attach(GetAddress(cEmpire, Destroy));
 	ShouldSpawnRaiderUFO__detour::attach(Address(ModAPI::ChooseAddress(0x00c5adc0, 0x00c5b860)));
-
 	SpawnUFO__detour::attach(Address(ModAPI::ChooseAddress(0x0102bbb0, 0x0102acc0)));
 	GenerateNpcPlanetDefenders__detour::attach(Address(ModAPI::ChooseAddress(0x00ffa340, 0x00ff96b0)));
 }
