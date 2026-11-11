@@ -2,6 +2,7 @@
 #include "cWarfareStrengthAnalyzer.h"
 
 #include <Spore-Mod-Utils/Include/SporeModUtils.h>
+#include <Spore/Simulator/cCity.h>
 #include <cmath>
 
 using namespace SporeModUtils;
@@ -45,13 +46,17 @@ void* cWarfareStrengthAnalyzer::Cast(uint32_t type) const
 }
 
 int cWarfareStrengthAnalyzer::GetBomberForceForPlanet(Simulator::cEmpire* empire, Simulator::cPlanetRecord* planet){
-    if (planet->GetTechLevel() != TechLevel::Empire) {
+    if (planet == nullptr || empire == nullptr || planet->GetTechLevel() != TechLevel::Empire) {
         return 0;
     }
-    cEmpire* targetEmpire = StarManager.GetEmpire(planet->GetStarRecord()->mEmpireID);
-    float empireBomberHealth = spaceCombatMetrics->GetBomberHealthByEmpire(empire);
-    float empireFighterHealth = spaceCombatMetrics->GetFighterHealthByEmpire(empire);
-    int empireFightersPerBomber = spaceCombatMetrics->GetFightersPerBomber();
+
+    cEmpire* targetEmpire = (planet->GetStarRecord() != nullptr)
+        ? StarManager.GetEmpire(planet->GetStarRecord()->mEmpireID)
+        : nullptr;
+
+    float empireBomberHealth = max(spaceCombatMetrics->GetBomberHealthByEmpire(empire), 1.0f);
+    float empireFighterHealth = max(spaceCombatMetrics->GetFighterHealthByEmpire(empire), 1.0f);
+    int empireFightersPerBomber = max(spaceCombatMetrics->GetFightersPerBomber(), 1);
     float targetTurretHealth = spaceCombatMetrics->GetTurretHealthByEmpire(targetEmpire);
     float targetDefenderHealth = spaceCombatMetrics->GetDefenderHealthByEmpire(targetEmpire);
     int planetDefenders = spaceCombatMetrics->GetDefendersInPlanet(planet);
@@ -60,22 +65,35 @@ int cWarfareStrengthAnalyzer::GetBomberForceForPlanet(Simulator::cEmpire* empire
     float fightersToDefeatDefenders = max((planetDefenders * targetDefenderHealth) / empireFighterHealth, static_cast<float>(empireFightersPerBomber));
     float bombersToDefeatTurrets = max((planetTurrets * targetTurretHealth) / (empireBomberHealth + empireFightersPerBomber * empireFighterHealth), 1.0f);
 
-    float rawRequired = bombersToDefeatTurrets + fightersToDefeatDefenders / empireFightersPerBomber;
+    float rawRequired = bombersToDefeatTurrets + fightersToDefeatDefenders / static_cast<float>(empireFightersPerBomber);
 
-    // Модификатор штурмовой доктрины по философии атакующей империи
+    // Чистый модификатор военной доктрины философии (не зависящий от ползунка глобального производства бомберов)
     float archetypeAssaultMultiplier = 1.0f;
-    if (empire != nullptr && archetypeStrengthConfig != nullptr) {
-        float baseStr = archetypeStrengthConfig->GetArchetypeBaseStrength(empire->mArchetype);
-        if (baseStr > 1.0f) {
-            // Воинственные фракции (Воины, Фанатики) получают бонус к штурму
-            archetypeAssaultMultiplier = baseStr;
-        } else if (baseStr < 1.0f && baseStr > 0.0f) {
-            // Мирные фракции отправляют минимальный расчетный эскорт
-            archetypeAssaultMultiplier = baseStr;
-        }
+    Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
+    switch (baseArchetype) {
+        case Archetypes::kArchetypeWarrior:
+        case Archetypes::kArchetypeZealot:
+        case Archetypes::kArchetypeGrob:
+            // Милитаристы идут на подавляющий штурм (+35%)
+            archetypeAssaultMultiplier = 1.35f;
+            break;
+        case Archetypes::kArchetypeScientist:
+            // Технократы полагаются на точность ударных звеньев (-15%)
+            archetypeAssaultMultiplier = 0.85f;
+            break;
+        case Archetypes::kArchetypeBard:
+        case Archetypes::kArchetypeShaman:
+        case Archetypes::kArchetypeDiplomat:
+            // Мирные державы отправляют экономный эскорт (-15%), но не ниже порога пробития турелей
+            archetypeAssaultMultiplier = 0.85f;
+            break;
+        default:
+            archetypeAssaultMultiplier = 1.0f;
+            break;
     }
 
-    int requiredBombers = static_cast<int>(round(rawRequired * archetypeAssaultMultiplier));
+    int minViableBombers = max(static_cast<int>(ceil(bombersToDefeatTurrets)), 1);
+    int requiredBombers = max(static_cast<int>(round(rawRequired * archetypeAssaultMultiplier)), minViableBombers);
     int maxBombers = warfareConfig->GetMaxBombersInRaid();
 
     // 1. Относительное масштабирование для столиц от пользовательского конфига
@@ -86,7 +104,7 @@ int cWarfareStrengthAnalyzer::GetBomberForceForPlanet(Simulator::cEmpire* empire
     // 2. Эластичный мягкий потолок рейда (Soft-Cap) вместо жесткого обрезания
     if (requiredBombers > maxBombers) {
         float excess = static_cast<float>(requiredBombers - maxBombers);
-        requiredBombers = maxBombers + static_cast<int>(round(sqrt(excess) * 2.0f));
+        requiredBombers = maxBombers + static_cast<int>(round(std::sqrt(excess) * 2.0f));
     }
 
     return max(requiredBombers, 1);
@@ -106,9 +124,9 @@ int cWarfareStrengthAnalyzer::GetBomberForceForSystem(Simulator::cEmpire* empire
 }
 
 float cWarfareStrengthAnalyzer::GetBombersProducedByFactory(ResourceKey spiceKey){
-    float cheapestSpiceCost = SpiceUtils::GetSpiceBaseCost(SpiceUtils::GetCheapestSpice(spiceCosts), spiceCosts);
+    float cheapestSpiceCost = max(SpiceUtils::GetSpiceBaseCost(SpiceUtils::GetCheapestSpice(spiceCosts), spiceCosts), 1.0f);
     float spiceCost = SpiceUtils::GetSpiceBaseCost(spiceKey, spiceCosts);
-    if (spiceCost == 0) {
+    if (spiceCost <= 0.0f) {
         spiceCost = cheapestSpiceCost;
     }
     float spiceCostRatio = spiceCost / cheapestSpiceCost;
@@ -116,6 +134,8 @@ float cWarfareStrengthAnalyzer::GetBombersProducedByFactory(ResourceKey spiceKey
 }
 
 int cWarfareStrengthAnalyzer::GetFactoryCountInPlanet(Simulator::cPlanetRecord* planet){
+    if (planet == nullptr) return 0;
+
     int baseColonies = 1;
     switch (planet->mType) {
     case(PlanetType::T1):
@@ -153,11 +173,12 @@ int cWarfareStrengthAnalyzer::GetFactoryCountInPlanet(Simulator::cPlanetRecord* 
     }
 
     int totalBuildings = actualColonies * buildingsPerColony;
-    return max(totalBuildings / warfareConfig->GetBuildingsPerFactoryRatio(), 1);
+    int ratio = max(warfareConfig->GetBuildingsPerFactoryRatio(), 1);
+    return max(totalBuildings / ratio, 1);
 }
 
 float cWarfareStrengthAnalyzer::GetBombersProducedByPlanet(Simulator::cPlanetRecord* planet){
-    if (planet->GetTechLevel() == TechLevel::Empire) {
+    if (planet != nullptr && planet->GetTechLevel() == TechLevel::Empire) {
         return GetFactoryCountInPlanet(planet) * GetBombersProducedByFactory(planet->mSpiceGen);
     }
     else {
@@ -166,7 +187,8 @@ float cWarfareStrengthAnalyzer::GetBombersProducedByPlanet(Simulator::cPlanetRec
 }
 
 float cWarfareStrengthAnalyzer::GetBombersProducedBySystem(Simulator::cStarRecord* star){
-    float bombersProduced = 0;
+    if (star == nullptr) return 0.0f;
+    float bombersProduced = 0.0f;
     for (cPlanetRecordPtr planet : star->GetPlanetRecords()) {
         if (simulationValidator->ValidPlanet(planet.get()) && planet->GetTechLevel() == TechLevel::Empire) {
             bombersProduced += GetBombersProducedByPlanet(planet.get());
@@ -188,7 +210,9 @@ float cWarfareStrengthAnalyzer::AdjustBombersForCaps(float bomberCount) {
 }
 
 float cWarfareStrengthAnalyzer::GetBombersProducedByEmpire(Simulator::cEmpire* empire){
-    float bombersProduced = 0;
+    if (empire == nullptr) return 0.0f;
+
+    float bombersProduced = 0.0f;
     for (cStarRecordPtr star : empire->mStars) {
         if (simulationValidator->ValidStar(star.get())) {
             bombersProduced += GetBombersProducedBySystem(star.get());
@@ -202,9 +226,13 @@ float cWarfareStrengthAnalyzer::GetBombersProducedByEmpire(Simulator::cEmpire* e
 }
 
 float cWarfareStrengthAnalyzer::GetEmpireStrenghtFactor(Simulator::cEmpire* empire){
+    if (empire == nullptr) return 0.0f;
+
     float bombersProducedByEmpire = GetBombersProducedByEmpire(empire);
-    float empireBomberHealth = spaceCombatMetrics->GetBomberHealthByEmpire(empire);
-    float MaxLevelBomberHealth = spaceCombatMetrics->GetBomberHealthByLevel(4);
-    float bomberHealthRatio = MaxLevelBomberHealth / empireBomberHealth;
+    float empireBomberHealth = max(spaceCombatMetrics->GetBomberHealthByEmpire(empire), 1.0f);
+    float maxLevelBomberHealth = max(spaceCombatMetrics->GetBomberHealthByLevel(4), 1.0f);
+
+    // Исправлена перевернутая дробь: чем выше здоровье кораблей империи, тем выше ее боевой индекс
+    float bomberHealthRatio = empireBomberHealth / maxLevelBomberHealth;
     return bombersProducedByEmpire * bomberHealthRatio;
 }
