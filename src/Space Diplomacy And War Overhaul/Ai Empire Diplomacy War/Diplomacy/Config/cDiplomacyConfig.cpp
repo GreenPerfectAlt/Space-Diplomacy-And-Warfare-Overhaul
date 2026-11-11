@@ -7,6 +7,8 @@ using namespace Simulator;
 
 cDiplomacyConfig::cDiplomacyConfig(ResourceKey configKey)
 {
+	powerThresholdToAvoidWar = 2.5f;
+
 	PropertyListPtr configProp;
 	PropManager.GetPropertyList(configKey.instanceID, configKey.groupID, configProp);
 
@@ -114,15 +116,15 @@ float cDiplomacyConfig::GetMaxWarProbability() {
 	return maxWarProbability;
 }
 
-float  cDiplomacyConfig::GetAgressivityWeightForWar() {
+float cDiplomacyConfig::GetAgressivityWeightForWar() {
 	return aggressivityWeightForWar;
 }
 
-float  cDiplomacyConfig::GetAffinityWeightForWar() {
+float cDiplomacyConfig::GetAffinityWeightForWar() {
 	return affinityWeightForWar;
 }
 
-float  cDiplomacyConfig::GetMinWarProbability() {
+float cDiplomacyConfig::GetMinWarProbability() {
 	return minWarProbability;
 }
 
@@ -140,10 +142,16 @@ int cDiplomacyConfig::GetAffinityThresholdForWar() {
 
 int cDiplomacyConfig::GetArchetypeAgressivity(Simulator::Archetypes archetype) {
 	Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(archetype);
+	if (int(baseArchetype) < 0 || int(baseArchetype) >= int(baseAggressivityByArchetype.size())) {
+		return 1;
+	}
 	return baseAggressivityByArchetype[baseArchetype];
 }
 
 int cDiplomacyConfig::GetAggressivityGrowthByPowerLevel(int powerLevel) {
+	if (aggressivityGrowthByPowerLevel.empty()) return 0;
+	if (powerLevel < 0) return aggressivityGrowthByPowerLevel.front();
+	if (powerLevel >= int(aggressivityGrowthByPowerLevel.size())) return aggressivityGrowthByPowerLevel.back();
 	return aggressivityGrowthByPowerLevel[powerLevel];
 }
 
@@ -155,6 +163,6 @@ bool cDiplomacyConfig::GetStartsWarsWhileAtWar() {
 	return startsWarsWhileAtWar;
 }
 
-bool cDiplomacyConfig::GetPowerThresholdToAvoidWar() {
+float cDiplomacyConfig::GetPowerThresholdToAvoidWar() {
 	return powerThresholdToAvoidWar;
 }
