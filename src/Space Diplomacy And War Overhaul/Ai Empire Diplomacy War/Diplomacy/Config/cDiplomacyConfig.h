@@ -32,10 +32,10 @@ public:
 	/// @brief Gets the lower limit below which decreased affinity has no additional effect.
 	int GetMinAffinitySoftCap();
 
-	/// @brief Gets the upper bound for an empire’s aggressivity.
+	/// @brief Gets the upper bound for an empire's aggressivity.
 	int GetMaxAgressivity();
 
-	/// @brief Gets the lower bound for an empire’s aggressivity.
+	/// @brief Gets the lower bound for an empire's aggressivity.
 	int GetMinAgressivity();
 
 	/// @brief Gets the maximum probability of alliance between two empires during a single cycle.
@@ -75,7 +75,7 @@ public:
 	bool GetStartsWarsWhileAtWar();
 
 	/// @brief Gets the power ratio threshold above which an empire avoids declaring war.
-	bool GetPowerThresholdToAvoidWar();
+	float GetPowerThresholdToAvoidWar();
 
 
 	// Diplomacy range per empire level, in parsecs.
@@ -87,10 +87,10 @@ public:
 	// The lower limit below which decreased affinity has no additional effect.
 	int minAffinitySoftCap;
 
-	// Upper bound for an empire’s aggressivity.
+	// Upper bound for an empire's aggressivity.
 	int maxAgressivity;
 
-	// Lower bound for an empire’s aggressivity.
+	// Lower bound for an empire's aggressivity.
 	int minAgressivity;
 
 	// The maximum probability of alliance between two empires during a single cycle.
