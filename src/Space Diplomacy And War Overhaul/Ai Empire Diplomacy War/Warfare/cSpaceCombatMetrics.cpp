@@ -1,6 +1,8 @@
 #include "stdafx.h"
 #include "cSpaceCombatMetrics.h"
 #include <Spore-Mod-Utils/Include/SporeModUtils.h>
+#include <Spore/Simulator/cCity.h>
+#include <cmath>
 
 using namespace SporeModUtils;
 using namespace Simulator;
@@ -18,7 +20,6 @@ cSpaceCombatMetrics::cSpaceCombatMetrics(ResourceKey spaceCombatKey)
 	PropManager.GetPropertyList(0x4e5855b9, 0x0568de14, relationshipEffectsProp);
 	eastl::vector<int> defendersOutpost;
 	eastl::vector<int> defendersColony;
-	eastl::vector<int> defendersHomeworld;
 
 	App::Property::GetArrayInt32(relationshipEffectsProp.get(), 0x067B69D0, defendersOutpost);
 	App::Property::GetArrayInt32(relationshipEffectsProp.get(), 0x067B69EB, defendersColony);
@@ -29,19 +30,19 @@ cSpaceCombatMetrics::cSpaceCombatMetrics(ResourceKey spaceCombatKey)
 	PropertyListPtr RaidWarProp;
 	PropManager.GetPropertyList(0xbbae6b99, 0x02ae1a8e, RaidWarProp);
 
-	int maxFighters;
-	int minFighters;
+	int maxFighters = 2;
+	int minFighters = 2;
 	App::Property::GetInt32(RaidWarProp.get(), 0x0339BBC5, maxFighters);
 	App::Property::GetInt32(RaidWarProp.get(), 0x0339BBC1, minFighters);
 
-	numFightersPerBomber = (maxFighters + minFighters) / 2;
+	numFightersPerBomber = max((maxFighters + minFighters) / 2, 1);
 
 	PropertyListPtr terraformTuningProp;
 	PropManager.GetPropertyList(0xa6d1bc70, 0x02ae0c7e, terraformTuningProp);
 
-	int numBuildingsT1;
-	int numBuildingsT2;
-	int numBuildingsT3;
+	int numBuildingsT1 = 4;
+	int numBuildingsT2 = 8;
+	int numBuildingsT3 = 12;
 	App::Property::GetInt32(terraformTuningProp.get(), 0x04A5D473, numBuildingsT1);
 	App::Property::GetInt32(terraformTuningProp.get(), 0x04A5D46D, numBuildingsT2);
 	App::Property::GetInt32(terraformTuningProp.get(), 0x052F046E, numBuildingsT3);
@@ -139,11 +140,13 @@ int cSpaceCombatMetrics::GetTurretsInT3()
 
 float cSpaceCombatMetrics::GetBomberHealthByEmpire(Simulator::cEmpire* empire)
 {
-	float baseHealth = GetBomberHealthByLevel(empire->GetWeaponryLevel());
-	if (empire == nullptr) return baseHealth;
+	if (empire == nullptr) {
+		return GetBomberHealthByLevel(0);
+	}
 
-	// Динамический модификатор относительно уровня вооружения и агрессивности
-	float levelFactor = static_cast<float>(empire->GetWeaponryLevel() + 1) / 5.0f;
+	int weaponLevel = empire->GetWeaponryLevel();
+	float baseHealth = GetBomberHealthByLevel(weaponLevel);
+	float levelFactor = static_cast<float>(weaponLevel + 1) / 5.0f;
 	Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
 
 	switch (baseArchetype) {
@@ -163,10 +166,13 @@ float cSpaceCombatMetrics::GetBomberHealthByEmpire(Simulator::cEmpire* empire)
 
 float cSpaceCombatMetrics::GetFighterHealthByEmpire(Simulator::cEmpire* empire)
 {
-	float baseHealth = GetFighterHealthByLevel(empire->GetWeaponryLevel());
-	if (empire == nullptr) return baseHealth;
+	if (empire == nullptr) {
+		return GetFighterHealthByLevel(0);
+	}
 
-	float levelFactor = static_cast<float>(empire->GetWeaponryLevel() + 1) / 5.0f;
+	int weaponLevel = empire->GetWeaponryLevel();
+	float baseHealth = GetFighterHealthByLevel(weaponLevel);
+	float levelFactor = static_cast<float>(weaponLevel + 1) / 5.0f;
 	Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
 
 	switch (baseArchetype) {
@@ -186,10 +192,35 @@ float cSpaceCombatMetrics::GetFighterHealthByEmpire(Simulator::cEmpire* empire)
 
 float cSpaceCombatMetrics::GetDefenderHealthByEmpire(Simulator::cEmpire* empire)
 {
-	float baseHealth = GetDefenderHealthByLevel(empire->GetWeaponryLevel());
-	if (empire == nullptr) return baseHealth;
+	if (empire == nullptr) {
+		return GetDefenderHealthByLevel(0);
+	}
 
-	float levelFactor = static_cast<float>(empire->GetWeaponryLevel() + 1) / 5.0f;
+	// Синхронизация оценки ХП защитников игрока с модом Defensive Ships In Player Colonies
+	if (empire == GetPlayerEmpire()) {
+		PropertyListPtr propListFleet;
+		if (PropManager.GetPropertyList(id(u"FleetConfig"), 0x02ae0c7e, propListFleet) && propListFleet != nullptr) {
+			int weaponryRank = max(empire->GetWeaponryLevel(), 1);
+			int totalStars = static_cast<int>(empire->mStars.size());
+			float imperialIndustrialBonus = min(static_cast<float>(totalStars) * 8.0f, 400.0f);
+			float dynamicBaseHealth = 450.0f + (static_cast<float>(weaponryRank) * 120.0f) + imperialIndustrialBonus;
+
+			float archetypeMultiplier = 1.0f;
+			int arch = empire->mArchetype;
+			if (arch == 1 || arch == 2 || arch == 3 || arch == 10 || arch == 11 || arch == 12 || arch == 13) {
+				archetypeMultiplier = 1.35f;
+			} else if (arch == 4 || arch == 5 || arch == 6 || arch == 14 || arch == 15 || arch == 16) {
+				archetypeMultiplier = 1.10f;
+			} else {
+				archetypeMultiplier = 0.85f;
+			}
+			return dynamicBaseHealth * archetypeMultiplier;
+		}
+	}
+
+	int weaponLevel = empire->GetWeaponryLevel();
+	float baseHealth = GetDefenderHealthByLevel(weaponLevel);
+	float levelFactor = static_cast<float>(weaponLevel + 1) / 5.0f;
 	Simulator::Archetypes baseArchetype = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
 
 	switch (baseArchetype) {
@@ -209,6 +240,9 @@ float cSpaceCombatMetrics::GetDefenderHealthByEmpire(Simulator::cEmpire* empire)
 
 float cSpaceCombatMetrics::GetTurretHealthByEmpire(Simulator::cEmpire* empire)
 {
+	if (empire == nullptr) {
+		return GetTurretHealthByLevel(0);
+	}
 	return GetTurretHealthByLevel(empire->GetWeaponryLevel());
 }
 
@@ -218,13 +252,63 @@ int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 		return GetDefendersInColony();
 	}
 
-	if (planet->mType == PlanetType::T0) {
-		return GetDefendersInOutpost();
-	}
-
 	cEmpire* empire = nullptr;
 	if (planet->GetStarRecord() != nullptr) {
 		empire = StarManager.GetEmpire(planet->GetStarRecord()->mEmpireID);
+	}
+
+	// Автоматическая синхронизация с Defensive Ships In Player Colonies (если он установлен у игрока)
+	if (empire != nullptr && empire == GetPlayerEmpire()) {
+		PropertyListPtr propListFleet;
+		if (PropManager.GetPropertyList(id(u"FleetConfig"), 0x02ae0c7e, propListFleet) && propListFleet != nullptr) {
+			float fleetMultiplier = 1.0f;
+			App::Property::GetFloat(propListFleet.get(), 0x07A1BC01, fleetMultiplier);
+			if (fleetMultiplier <= 0.05f || fleetMultiplier > 5.0f) {
+				fleetMultiplier = 1.0f;
+			}
+
+			int colonyCount = 1;
+			if (planet->mbHomeWorld) colonyCount = 3;
+			else if (planet->mType == PlanetType::T2) colonyCount = 2;
+			else if (planet->mType == PlanetType::T3) colonyCount = 3;
+
+			if (GetCurrentContext() == SpaceContext::Planet && planet == GetActivePlanetRecord()) {
+				int loadedCities = 0;
+				const auto& cities = Simulator::GetData<cCity>();
+				for (const auto& city : cities) {
+					if (city) loadedCities++;
+				}
+				if (loadedCities > 0) colonyCount = loadedCities;
+			}
+
+			int stepBonus = 1;
+			if (planet->mType == PlanetType::T1) stepBonus = 2;
+			else if (planet->mType == PlanetType::T2) stepBonus = 3;
+			else if (planet->mType == PlanetType::T3) stepBonus = 4;
+
+			int basePlayerDef = 10;
+			if (planet->mbHomeWorld) basePlayerDef = 20;
+			else if (planet->mType == PlanetType::T0) basePlayerDef = 5;
+
+			int rawTotal = basePlayerDef + (colonyCount - 1) * stepBonus;
+			rawTotal = static_cast<int>(round(static_cast<float>(rawTotal) * fleetMultiplier));
+
+			int totalSystems = static_cast<int>(empire->mStars.size());
+			int weaponryRank = max(empire->GetWeaponryLevel(), 1);
+			int dynamicCap = static_cast<int>(round(static_cast<float>(20 + static_cast<int>(totalSystems * 0.8f) + (weaponryRank * 3)) * fleetMultiplier));
+			if (dynamicCap < 12) dynamicCap = 12;
+			if (dynamicCap > 120) dynamicCap = 120;
+
+			if (rawTotal > dynamicCap) {
+				float excess = static_cast<float>(rawTotal - dynamicCap);
+				return dynamicCap + static_cast<int>(round(std::sqrt(excess) * 4.0f));
+			}
+			return max(rawTotal, 1);
+		}
+	}
+
+	if (planet->mType == PlanetType::T0) {
+		return GetDefendersInOutpost();
 	}
 
 	int baseColonyDefenders = GetDefendersInColony();
@@ -238,7 +322,7 @@ int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 			case Archetypes::kArchetypeWarrior:
 			case Archetypes::kArchetypeZealot:
 			case Archetypes::kArchetypeGrob:
-				archetypeMultiplier = 2.5f; // Воинственные фракции масштабируют базовый гарнизон
+				archetypeMultiplier = 2.5f;
 				break;
 			case Archetypes::kArchetypeScientist:
 			case Archetypes::kArchetypeTrader:
@@ -256,6 +340,9 @@ int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 		}
 
 		float tScoreFactor = (planet->mType == PlanetType::T3) ? 1.5f : ((planet->mType == PlanetType::T2) ? 1.0f : 0.6f);
+		if (PlanetUtils::Homeworld(planet)) {
+			tScoreFactor *= 1.35f;
+		}
 		baseDefenders = max(static_cast<int>(round(static_cast<float>(baseColonyDefenders) * archetypeMultiplier * tScoreFactor)), 2);
 	}
 
