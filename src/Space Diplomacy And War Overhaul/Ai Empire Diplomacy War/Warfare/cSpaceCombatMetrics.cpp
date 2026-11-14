@@ -72,6 +72,28 @@ void* cSpaceCombatMetrics::Cast(uint32_t type) const
 	return nullptr;
 }
 
+static bool MatchSdoGadgetKey(uint32_t idVal, const char* n1, const char* n2, const char* n3 = nullptr, uint32_t raw1 = 0, uint32_t raw2 = 0)
+{
+	if (idVal == 0) return false;
+	if (n1 && idVal == id(n1)) return true;
+	if (n2 && idVal == id(n2)) return true;
+	if (n3 && idVal == id(n3)) return true;
+	if (raw1 != 0 && idVal == raw1) return true;
+	if (raw2 != 0 && idVal == raw2) return true;
+	return false;
+}
+
+static float GetExternalGadgetMultiplier()
+{
+	float mult = 1.0f;
+	PropertyListPtr propList;
+	if (PropManager.GetPropertyList(id(u"GadgetConfig"), 0x02ae0c7e, propList) && propList != nullptr) {
+		App::Property::GetFloat(propList.get(), 0x07A1BC06, mult);
+	}
+	if (mult < 0.0f || mult > 5.0f) mult = 1.0f;
+	return mult;
+}
+
 void cSpaceCombatMetrics::UpdatePlanetDefenseCache(Simulator::cPlanetRecord* planet)
 {
 	if (planet == nullptr) return;
@@ -89,8 +111,51 @@ void cSpaceCombatMetrics::UpdatePlanetDefenseCache(Simulator::cPlanetRecord* pla
 		if (cityCount > 0) {
 			planetDefenseCache[cPlanetRecordPtr(planet)] = eastl::make_pair(cityCount, turretCount);
 		}
+
+		SdoPlanetGadgetInfo info;
+		if (GetExternalGadgetMultiplier() > 0.01f) {
+			const auto& spatials = Simulator::GetDataByCast<cSpatialObject>();
+			for (const auto& sp : spatials) {
+				if (!sp) continue;
+				cCombatant* asComb = object_cast<cCombatant>(sp.get());
+				if (asComb && asComb->mHealthPoints <= 0.0f) continue;
+
+				uint32_t modelId = sp->GetModelKey().instanceID;
+				if (MatchSdoGadgetKey(modelId, "loyaltybooster", "b_loyaltybooster", "pl_loyalty_booster", 0x04668B8A, 0x03F3E4A1)) {
+					info.hasLoyaltyBooster = true;
+				} else if (MatchSdoGadgetKey(modelId, "happinessbooster", "b_happinessbooster", "pl_happiness_booster", 0x04668B89, 0x03F3E4A0)) {
+					info.hasHappinessBooster = true;
+				} else if (MatchSdoGadgetKey(modelId, "uberturret", "b_uberturret", "super_turret", 0x0246F65C, 0x04668B8B)) {
+					info.hasUberTurret = true;
+				} else if (MatchSdoGadgetKey(modelId, "spicestorage", "b_spicestorage", "pl_spice_storage", 0x04668B8C, 0x03F3E4A2)) {
+					info.hasSpiceStorage = true;
+				} else if (MatchSdoGadgetKey(modelId, "bioprotector", "biostabilizer", "b_bioprotector", 0x04668B87, 0x04668B88)) {
+					info.hasBioProtector = true;
+				} else if (MatchSdoGadgetKey(modelId, "embassy", "b_embassy", "pl_embassy", 0x04668B8E, 0x03F3E4A5)) {
+					info.hasEmbassy = true;
+				}
+			}
+		}
+		planetGadgetCache[cPlanetRecordPtr(planet)] = info;
 	}
 }
+
+SdoPlanetGadgetInfo cSpaceCombatMetrics::GetPlanetGadgetInfo(Simulator::cPlanetRecord* planet)
+{
+	SdoPlanetGadgetInfo emptyInfo;
+	if (planet == nullptr || GetExternalGadgetMultiplier() <= 0.01f) {
+		return emptyInfo;
+	}
+	if (GetCurrentContext() == SpaceContext::Planet && planet == GetActivePlanetRecord()) {
+		UpdatePlanetDefenseCache(planet);
+	}
+	auto it = planetGadgetCache.find(cPlanetRecordPtr(planet));
+	if (it != planetGadgetCache.end()) {
+		return it->second;
+	}
+	return emptyInfo;
+}
+
 
 int cSpaceCombatMetrics::GetCachedCityCount(Simulator::cPlanetRecord* planet) const
 {
@@ -308,6 +373,9 @@ int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 			else if (planet->mType == PlanetType::T0) basePlayerDef = 5;
 
 			int rawTotal = basePlayerDef + (colonyCount - 1) * stepBonus;
+			if (GetPlanetGadgetInfo(planet).hasSpiceStorage) {
+				rawTotal = static_cast<int>(round(static_cast<float>(rawTotal) * (1.0f + 0.25f * GetExternalGadgetMultiplier())));
+			}
 			rawTotal = static_cast<int>(round(static_cast<float>(rawTotal) * fleetMult));
 
 			int totalSystems = static_cast<int>(empire->mStars.size());
@@ -366,8 +434,13 @@ int cSpaceCombatMetrics::GetDefendersInPlanet(Simulator::cPlanetRecord* planet)
 		baseDefenders += (cachedCities - standardCities) * max(baseColonyDefenders / 2, 1);
 	}
 
+	if (GetPlanetGadgetInfo(planet).hasSpiceStorage) {
+		baseDefenders = static_cast<int>(round(static_cast<float>(baseDefenders) * (1.0f + 0.25f * GetExternalGadgetMultiplier())));
+	}
+
 	return baseDefenders;
 }
+
 
 int cSpaceCombatMetrics::GetTurretsInPlanet(Simulator::cPlanetRecord* planet)
 {
@@ -399,11 +472,17 @@ int cSpaceCombatMetrics::GetTurretsInPlanet(Simulator::cPlanetRecord* planet)
 	}
 
 	// Если планета была посещена в сессии — возвращаем точное число турелей из кэша (включая застройку Т0 и Unlimited-Colony)
+	int finalTurrets = baseTurrets;
 	if (cachedCities > 0) {
 		if (cachedCities > standardCities || cachedTurrets > baseTurrets || planet->mType == PlanetType::T0) {
-			return cachedTurrets;
+			finalTurrets = cachedTurrets;
 		}
 	}
 
-	return baseTurrets;
+	// Баланс Убербашни: эквивалент мощного орбитального щита (+14 тяжелых турелей в расчете штурма)
+	if (GetPlanetGadgetInfo(planet).hasUberTurret) {
+		finalTurrets += static_cast<int>(round(14.0f * GetExternalGadgetMultiplier()));
+	}
+
+	return finalTurrets;
 }
