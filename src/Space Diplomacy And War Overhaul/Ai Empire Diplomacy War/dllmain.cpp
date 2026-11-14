@@ -25,7 +25,11 @@
 #include "cPersistenceState.h"
 #include "cDatabaseManager.h"
 #include "Diplomacy/PersistedEvent/cPreparingToDeclareWarEvent.h"
+#include <Spore/Simulator/cCity.h>
+#include <Spore/Simulator/cBuilding.h>
+#include <EASTL/map.h>
 #include <cmath>
+#include <ctime>
 
 using namespace SporeModUtils;
 using namespace Simulator;
@@ -67,17 +71,54 @@ member_detour(ShouldSpawnRaiderUFO__detour, cRaidEvent, bool())
 };
 
 static bool sIsGeneratingInitialPlanetGarrison = false;
+static eastl::map<cPlanetRecordPtr, time_t> sNpcPlanetUprisingCooldowns;
+
+static float ReadExternalConfigFloat(const char16_t* propName, uint32_t propID, float defaultVal)
+{
+	PropertyListPtr propList;
+	if (PropManager.GetPropertyList(id(propName), 0x02ae0c7e, propList) && propList != nullptr) {
+		float val = defaultVal;
+		if (App::Property::GetFloat(propList.get(), propID, val)) {
+			return val;
+		}
+	}
+	return defaultVal;
+}
+
+static int CalculateDynamicMaxTreasury(cEmpire* empire, cCompositionRoot* root)
+{
+	if (!empire) return 100000;
+
+	int starCount = static_cast<int>(empire->mStars.size());
+	float bombersPerCycle = 2.0f;
+	if (root && root->warfareStrengthAnalyzer) {
+		bombersPerCycle = max(root->warfareStrengthAnalyzer->GetBombersProducedByEmpire(empire), 1.0f);
+	}
+
+	float redSpiceRate = 0.25f;
+	PropertyListPtr warfareProp;
+	if (PropManager.GetPropertyList(id("WarfareConfig"), id("SwoConfig"), warfareProp) && warfareProp != nullptr) {
+		App::Property::GetFloat(warfareProp.get(), 0xD07B1F69, redSpiceRate);
+	}
+	int unitCost = max(static_cast<int>(round(1000.0f / max(redSpiceRate, 0.1f))), 250);
+
+	Simulator::Archetypes baseArch = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
+	float tradeMultiplier = (baseArch == Archetypes::kArchetypeTrader) ? 1.75f : 1.0f;
+
+	int cycleValue = static_cast<int>(round(bombersPerCycle * static_cast<float>(unitCost) * tradeMultiplier));
+	int maxCap = 50000 + (starCount * 25000) + (cycleValue * 10);
+
+	if (maxCap < 60000) maxCap = 60000;
+	if (maxCap > 15000000) maxCap = 15000000;
+	return maxCap;
+}
 
 static float GetPlanetSpicePrice(cPlanetRecord* planet)
 {
-	if (!planet || planet->mType == PlanetType::T0) {
-		return 0.0f;
-	}
+	if (!planet) return 0.0f;
 
 	uint32_t spiceID = planet->mSpiceGen.instanceID;
-	if (spiceID == 0) {
-		return 0.0f;
-	}
+	if (spiceID == 0) return 0.0f;
 
 	PropertyListPtr spiceProp;
 	if (PropManager.GetPropertyList(spiceID, 0x034D97FA, spiceProp) && spiceProp != nullptr) {
@@ -92,59 +133,180 @@ static float GetPlanetSpicePrice(cPlanetRecord* planet)
 	return 300.0f; // Red, Yellow
 }
 
-static int CalculateEmpireMaxTreasury(cEmpire* empire, cCompositionRoot* root)
+static float GetNpcPlanetaryCityUnrestFactor(cPlanetRecord* planet, float unrestMultiplier)
 {
-	if (!empire || !root || !root->warfareStrengthAnalyzer) {
-		return 200000;
+	if (!planet || unrestMultiplier <= 0.01f) {
+		return 0.0f;
 	}
 
-	float redSpiceRate = 0.5f;
-	PropertyListPtr warfareProp;
-	if (PropManager.GetPropertyList(id("WarfareConfig"), id("SwoConfig"), warfareProp) && warfareProp != nullptr) {
-		App::Property::GetFloat(warfareProp.get(), 0xD07B1F69, redSpiceRate);
+	if (GetCurrentContext() != SpaceContext::Planet || planet != GetActivePlanetRecord()) {
+		return 0.0f;
 	}
-	int unitCost = max(static_cast<int>(round(1000.0f / max(redSpiceRate, 0.1f))), 250);
 
-	float bombersPerCycle = root->warfareStrengthAnalyzer->GetBombersProducedByEmpire(empire);
-	Simulator::Archetypes baseArch = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
-	float tradeMultiplier = (baseArch == Archetypes::kArchetypeTrader) ? 1.75f : 1.0f;
+	const auto& cities = GetData<cCity>();
+	int totalCities = 0;
+	int unhappyCitizens = 0;
+	int totalFactories = 0;
+	int totalEntertainment = 0;
 
-	int cycleIncome = static_cast<int>(round(bombersPerCycle * static_cast<float>(unitCost) * tradeMultiplier));
-	int starCount = static_cast<int>(empire->mStars.size());
+	for (const auto& city : cities) {
+		if (!city) continue;
+		totalCities++;
+		if (city->mUnhappyCount > 0) {
+			unhappyCitizens += city->mUnhappyCount;
+		}
 
-	int maxCap = static_cast<int>(round((50000.0f + starCount * 25000.0f + cycleIncome * 10.0f) * tradeMultiplier));
-	return max(maxCap, 75000);
+		for (const auto& bld : city->mBuildings) {
+			if (!bld) continue;
+			int bType = bld->GetBuildingType();
+			if (bType == kBuildingFactory) {
+				totalFactories++;
+			} else if (bType == kBuildingEntertainment) {
+				totalEntertainment++;
+			}
+		}
+	}
+
+	if (totalCities == 0) return 0.0f;
+
+	float unrestScore = 0.0f;
+	if (unhappyCitizens > 0) {
+		unrestScore += min(static_cast<float>(unhappyCitizens) / static_cast<float>(totalCities * 3), 1.2f);
+	}
+
+	if (totalFactories > totalEntertainment + totalCities) {
+		float industrialExcess = static_cast<float>(totalFactories - (totalEntertainment + totalCities));
+		unrestScore += min(industrialExcess * 0.12f, 0.8f);
+	}
+
+	return min(unrestScore * unrestMultiplier, 2.0f);
+}
+
+static float CalculateLocalNpcInstabilityMultiplier(cPlanetRecord* planet, cEmpire* ownerEmpire, cCompositionRoot* root, float cityUnrestScore)
+{
+	float stabilityMod = 1.0f;
+	if (!planet || !ownerEmpire) return stabilityMod;
+
+	Simulator::Archetypes baseArch = ArchetypeUtils::GetBaseArchetype(ownerEmpire->mArchetype);
+
+	// 1. Столица и Терраиндекс (T0/T1 горячие точки, T3 стабильные миры)
+	if (PlanetUtils::Homeworld(planet)) {
+		stabilityMod *= 0.20f;
+	} else if (planet->mType == PlanetType::T0) {
+		stabilityMod *= 1.55f;
+	} else if (planet->mType == PlanetType::T1) {
+		stabilityMod *= 1.25f;
+	} else if (planet->mType == PlanetType::T3) {
+		stabilityMod *= 0.60f;
+	}
+
+	// 2. Рыночная цена местной пряности (включая T0-шахты)
+	float spicePrice = GetPlanetSpicePrice(planet);
+	if (spicePrice > 3500.0f) {
+		stabilityMod *= 0.65f;
+	} else if (spicePrice >= 2000.0f) {
+		stabilityMod *= 0.75f;
+	} else if (spicePrice > 0.0f && spicePrice <= 400.0f) {
+		stabilityMod *= 1.15f;
+	}
+
+	// 3. Плотность ратушей и сеть ПВО турелей (Unlimited-Colony)
+	int cityCount = 0;
+	int turretCount = 0;
+	const auto& cities = GetData<cCity>();
+	for (const auto& city : cities) {
+		if (city) {
+			cityCount++;
+			turretCount += static_cast<int>(city->mTurrets.size());
+		}
+	}
+	if (cityCount <= 1 && !PlanetUtils::Homeworld(planet)) {
+		stabilityMod *= 1.15f;
+	} else if (cityCount > 1) {
+		float cityControl = max(1.0f - static_cast<float>(cityCount - 1) * 0.07f, 0.55f);
+		stabilityMod *= cityControl;
+	}
+	if (turretCount >= 12) {
+		float turretControl = max(1.0f - static_cast<float>(turretCount - 10) * 0.015f, 0.70f);
+		stabilityMod *= turretControl;
+	}
+
+	// 4. Удаленность звезды от столицы по философии
+	cStarRecord* homeStar = EmpireUtils::GetHomeStar(ownerEmpire);
+	cStarRecord* currentStar = planet->GetStarRecord();
+	if (homeStar && currentStar && homeStar != currentStar) {
+		float dist = StarUtils::GetDistanceBetweenStars(homeStar, currentStar);
+
+		if (baseArch == Archetypes::kArchetypeWarrior || baseArch == Archetypes::kArchetypeTrader) {
+			if (dist > 12.0f) {
+				float rimPenalty = min((dist - 12.0f) * 0.025f, 0.60f);
+				stabilityMod *= (1.0f + rimPenalty);
+			}
+		} else if (baseArch == Archetypes::kArchetypeScientist) {
+			if (dist > 25.0f) {
+				float deepSpacePragmatism = min((dist - 25.0f) * 0.015f, 0.20f);
+				stabilityMod *= (1.0f + deepSpacePragmatism);
+			}
+		} else if (baseArch == Archetypes::kArchetypeDiplomat ||
+		           baseArch == Archetypes::kArchetypeEcologist ||
+		           baseArch == Archetypes::kArchetypeBard ||
+		           baseArch == Archetypes::kArchetypeShaman) {
+			if (dist > 12.0f) {
+				float autonomyBonus = min((dist - 12.0f) * 0.018f, 0.35f);
+				stabilityMod *= (1.0f - autonomyBonus);
+			}
+		}
+	}
+
+	// 5. Забастовки жителей и перекос фабрик без развлечений
+	if (cityUnrestScore > 0.01f) {
+		stabilityMod *= (1.0f + cityUnrestScore * 0.55f);
+	}
+
+	// 6. Идеологическая симпатия/вражда (Affinity) с игроком во время штурма
+	cEmpire* playerEmpire = GetPlayerEmpire();
+	if (playerEmpire && root && root->empireRelationsAnalyzer && DiplomacyUtils::War(ownerEmpire, playerEmpire)) {
+		int affinity = root->empireRelationsAnalyzer->EmpiresAffinity(ownerEmpire, playerEmpire);
+		if (affinity > 0) {
+			stabilityMod *= (1.0f + min(static_cast<float>(affinity) * 0.10f, 0.30f));
+		} else if (affinity <= -2) {
+			stabilityMod *= 0.80f;
+		}
+	}
+
+	return stabilityMod;
 }
 
 static bool IsNpcPlanetInCombat(cPlanetRecord* activePlanet, cEmpire* ownerEmpire)
 {
-	if (!activePlanet || !ownerEmpire) {
-		return false;
-	}
+	if (!activePlanet || !ownerEmpire) return false;
 
 	cEmpire* playerEmpire = GetPlayerEmpire();
-	if (playerEmpire && DiplomacyUtils::War(ownerEmpire, playerEmpire)) {
-		return true;
-	}
-
-	if (MissionManager.ThereIsEventInPlanet(activePlanet)) {
+	if (playerEmpire && RelationshipManager.IsAtWar(ownerEmpire, playerEmpire)) {
 		return true;
 	}
 
 	const auto& ufos = GetData<cGameDataUFO>();
 	for (const auto& ufo : ufos) {
 		if (ufo && ufo->mHealthPoints > 0 && ufo->mPoliticalID != 0 && ufo->mPoliticalID != ownerEmpire->GetEmpireID()) {
-			if (ufo->mUFOType == static_cast<int>(UfoType::Defender)) {
+			if (playerEmpire && ufo->mPoliticalID == playerEmpire->GetEmpireID()) {
 				continue;
 			}
 			cEmpire* otherEmpire = StarManager.GetEmpire(ufo->mPoliticalID);
-			if (!otherEmpire || DiplomacyUtils::War(ownerEmpire, otherEmpire)) {
+			if (!otherEmpire || RelationshipManager.IsAtWar(ownerEmpire, otherEmpire)) {
 				return true;
 			}
 		}
 	}
-
 	return false;
+}
+
+static float GetBaseArchetypeMutinyChance(Simulator::Archetypes baseArch)
+{
+	if (baseArch == Archetypes::kArchetypeWarrior) return 0.50f;
+	if (baseArch == Archetypes::kArchetypeTrader) return 0.40f;
+	if (baseArch == Archetypes::kArchetypeScientist || baseArch == Archetypes::kArchetypeEcologist) return 0.15f;
+	return 0.25f;
 }
 
 static bool ShouldTriggerNpcRebellion(cEmpire* ownerEmpire, cCompositionRoot* root, cGameDataUFO* newlySpawnedUfo)
@@ -163,33 +325,27 @@ static bool ShouldTriggerNpcRebellion(cEmpire* ownerEmpire, cCompositionRoot* ro
 		return false;
 	}
 
-	// Бунт возможен только во время реального боя на орбите
-	if (!IsNpcPlanetInCombat(activePlanet, ownerEmpire)) {
-		return false;
-	}
-
-	// Читаем настройку восстаний из RebellionConfig.prop (если установлен первый мод)
-	float rebellionMultiplier = 1.0f;
-	PropertyListPtr propListRebellion;
-	if (PropManager.GetPropertyList(id(u"RebellionConfig"), 0x02ae0c7e, propListRebellion) && propListRebellion != nullptr) {
-		App::Property::GetFloat(propListRebellion.get(), 0x07A1BC02, rebellionMultiplier);
-	}
+	float rebellionMultiplier = ReadExternalConfigFloat(u"RebellionConfig", 0x07A1BC02, 1.0f);
 	if (rebellionMultiplier <= 0.01f) {
 		return false;
 	}
 
-	// 1. Фанатики и Гроксы: иммунитет веры и коллективного разума
 	Simulator::Archetypes baseArch = ArchetypeUtils::GetBaseArchetype(ownerEmpire->mArchetype);
 	if (baseArch == Archetypes::kArchetypeZealot || baseArch == Archetypes::kArchetypeGrob) {
 		return false;
 	}
 
-	// 2. Проверка финансового кризиса империи (< 15% от динамического потолка казны)
-	int maxTreasury = CalculateEmpireMaxTreasury(ownerEmpire, root);
-	int crisisThreshold = static_cast<int>(round(static_cast<float>(maxTreasury) * 0.15f));
+	if (!IsNpcPlanetInCombat(activePlanet, ownerEmpire)) {
+		return false;
+	}
+
+	float unrestMultiplier = ReadExternalConfigFloat(u"UnrestConfig", 0x07A1BC04, 1.0f);
+	float cityUnrest = GetNpcPlanetaryCityUnrestFactor(activePlanet, unrestMultiplier);
+
+	int maxCap = CalculateDynamicMaxTreasury(ownerEmpire, root);
+	int crisisThreshold = static_cast<int>(round(static_cast<float>(maxCap) * 0.15f));
 	bool isBankrupt = (ownerEmpire->mEmpireMoney > 0 && ownerEmpire->mEmpireMoney < crisisThreshold);
 
-	// 3. Проверка боевых потерь гарнизона (включая малые Т0/Т1 колонии!)
 	int targetDefenders = min(root->spaceCombatMetrics->GetDefendersInPlanet(activePlanet), 24);
 	int aliveDefenders = 0;
 	const auto& ufos = GetData<cGameDataUFO>();
@@ -203,119 +359,98 @@ static bool ShouldTriggerNpcRebellion(cEmpire* ownerEmpire, cCompositionRoot* ro
 
 	bool heavyLosses = false;
 	if (targetDefenders <= 2) {
-		// На малых Т0/Т1 аванпостах паника начинается, как только сбили хотя бы часть стартовой охраны
 		heavyLosses = (aliveDefenders < targetDefenders);
 	} else {
-		heavyLosses = (aliveDefenders <= (targetDefenders / 2));
+		heavyLosses = (aliveDefenders < (targetDefenders / 2));
 	}
 
-	if (!isBankrupt && !heavyLosses) {
+	bool severeCityStrike = (cityUnrest >= 0.45f);
+	if (!isBankrupt && !heavyLosses && !severeCityStrike) {
 		return false;
 	}
 
-	// 4. Базовый шанс мятежа по философии
-	float rebellionChance = 0.25f;
-	if (baseArch == Archetypes::kArchetypeWarrior) {
-		rebellionChance = 0.45f; // Военная хунта
-	} else if (baseArch == Archetypes::kArchetypeTrader) {
-		rebellionChance = 0.35f; // Наемный флот
-	} else if (baseArch == Archetypes::kArchetypeScientist || baseArch == Archetypes::kArchetypeEcologist) {
-		rebellionChance = 0.15f; // Технократическая дисциплина
-	} else if (baseArch == Archetypes::kArchetypeDiplomat || baseArch == Archetypes::kArchetypeBard || baseArch == Archetypes::kArchetypeShaman) {
-		rebellionChance = 0.18f; // Дружелюбное самоуправление
+	float chance = GetBaseArchetypeMutinyChance(baseArch);
+	chance *= CalculateLocalNpcInstabilityMultiplier(activePlanet, ownerEmpire, root, cityUnrest);
+	chance *= rebellionMultiplier;
+	chance = min(max(chance, 0.01f), 0.90f);
+
+	return (Math::randf() < chance);
+}
+
+static void TryTriggerNpcPeacetimeColonialUprising(cPlanetRecord* planet, cEmpire* ownerEmpire, cCompositionRoot* root)
+{
+	if (!planet || !ownerEmpire || !root) return;
+
+	float rebellionMultiplier = ReadExternalConfigFloat(u"RebellionConfig", 0x07A1BC02, 1.0f);
+	if (rebellionMultiplier <= 0.01f) return;
+
+	Simulator::Archetypes baseArch = ArchetypeUtils::GetBaseArchetype(ownerEmpire->mArchetype);
+	if (baseArch == Archetypes::kArchetypeZealot || baseArch == Archetypes::kArchetypeGrob) {
+		return;
 	}
 
-	// 5. Фактор столицы и Терраиндекса планеты (Т0/Т1 каторги бунтуют сильно чаще, Т3 курорты лояльны)
-	float planetFactor = 1.0f;
-	if (PlanetUtils::Homeworld(activePlanet)) {
-		planetFactor = 0.20f; // Столичная гвардия почти непоколебима
-	} else if (activePlanet->mType == PlanetType::T0) {
-		planetFactor = 1.55f; // Суровый каторжный аванпост без атмосферы
-	} else if (activePlanet->mType == PlanetType::T1) {
-		planetFactor = 1.25f; // Бедная пограничная колония
-	} else if (activePlanet->mType == PlanetType::T3) {
-		planetFactor = 0.60f; // Райский развитый мир
+	// Защита кулдауном (не чаще раза в 4 минуты реального времени на одну планету НПС)
+	time_t now = std::time(nullptr);
+	auto itCool = sNpcPlanetUprisingCooldowns.find(planet);
+	if (itCool != sNpcPlanetUprisingCooldowns.end() && (now - itCool->second) < 240) {
+		return;
 	}
 
-	// 6. Фактор местной пряности (дорогая пряность кормит гарнизон, дешевая копит недовольство)
-	float spiceFactor = 1.0f;
-	float spicePrice = GetPlanetSpicePrice(activePlanet);
-	if (spicePrice > 3500.0f) {
-		spiceFactor = 0.65f; // Экзотическая пряность
-	} else if (spicePrice >= 2000.0f) {
-		spiceFactor = 0.75f; // Фиолетовая / Розовая
-	} else if (spicePrice >= 800.0f) {
-		spiceFactor = 0.90f; // Синяя / Зеленая
-	} else {
-		spiceFactor = 1.15f; // Дешевая Красная / Желтая или пустой Т0
+	float unrestMultiplier = ReadExternalConfigFloat(u"UnrestConfig", 0x07A1BC04, 1.0f);
+	float cityUnrest = GetNpcPlanetaryCityUnrestFactor(planet, unrestMultiplier);
+
+	float upkeepMultiplier = ReadExternalConfigFloat(u"UpkeepConfig", 0x07A1BC03, 1.0f);
+	int maxCap = CalculateDynamicMaxTreasury(ownerEmpire, root);
+	int crisisThreshold = static_cast<int>(round(static_cast<float>(maxCap) * 0.15f));
+	bool severeFiscalCrisis = (upkeepMultiplier > 0.01f && ownerEmpire->mEmpireMoney > 0 && ownerEmpire->mEmpireMoney < crisisThreshold);
+	bool severeCityStrike = (cityUnrest >= 0.50f);
+
+	// В мирное время столица НПС не поднимает стихийную гражданскую войну без жесткой забастовки городов
+	if (PlanetUtils::Homeworld(planet) && !severeCityStrike) {
+		return;
 	}
 
-	// 7. Фактор ратушей и турелей (полицейский контроль мегаполисов vs одинокое поселение)
-	int cityCount = 0;
-	int turretCount = 0;
-	const auto& cities = GetData<cCity>();
-	for (const auto& city : cities) {
-		if (city) {
-			cityCount++;
-			turretCount += static_cast<int>(city->mTurrets.size());
-		}
-	}
-	float urbanControlFactor = 1.0f;
-	if (cityCount <= 1 && !PlanetUtils::Homeworld(activePlanet)) {
-		urbanControlFactor = 1.15f; // Одинокая колония без контроля центра
-	} else if (cityCount > 1) {
-		urbanControlFactor = max(0.50f, 1.0f - static_cast<float>(cityCount - 1) * 0.07f);
-	}
-	if (turretCount >= 12) {
-		urbanControlFactor *= 0.85f; // Укрепленный бастион с гарнизонами ПВО
+	if (!severeFiscalCrisis && !severeCityStrike) {
+		return;
 	}
 
-	// 8. Удаленность от столицы + философская доктрина окраин!
-	// Авторитарные/наемные империи теряют контроль вдали от столицы (сепаратизм растет),
-	// а дружелюбные гармоничные философии дают колониям автономию (на окраинах спокойно!)
-	float distanceFactor = 1.0f;
-	cStarRecord* homeStar = EmpireUtils::GetHomeStar(ownerEmpire);
-	cStarRecord* currentStar = activePlanet->GetStarRecord();
-	if (homeStar && currentStar && homeStar != currentStar) {
-		float dist = StarUtils::GetDistanceBetweenStars(homeStar, currentStar);
-		const float coreRadius = 12.0f;
+	float uprisingChance = GetBaseArchetypeMutinyChance(baseArch) * 0.55f;
+	uprisingChance *= CalculateLocalNpcInstabilityMultiplier(planet, ownerEmpire, root, cityUnrest);
+	uprisingChance *= rebellionMultiplier;
+	uprisingChance = min(max(uprisingChance, 0.0f), 0.75f);
 
-		if (dist > coreRadius) {
-			float excessParsecs = min(dist - coreRadius, 40.0f);
-			if (baseArch == Archetypes::kArchetypeWarrior || baseArch == Archetypes::kArchetypeTrader) {
-				// Жесткий диктат Воинов и жадность Торговцев вызывают бунты на дальних рубежах (до +60%)
-				distanceFactor = 1.0f + (excessParsecs * 0.015f);
-			} else if (baseArch == Archetypes::kArchetypeDiplomat || baseArch == Archetypes::kArchetypeEcologist ||
-			           baseArch == Archetypes::kArchetypeBard || baseArch == Archetypes::kArchetypeShaman) {
-				// Дружелюбные философии живут в гармонии и самоуправлении — дальние миры еще спокойнее (до -35%)
-				distanceFactor = max(0.65f, 1.0f - (excessParsecs * 0.009f));
-			} else {
-				// Ученые: умеренный рост риска из-за растянутой связи (до +20%)
-				distanceFactor = 1.0f + (excessParsecs * 0.005f);
-			}
-		} else {
-			// Внутри столичного сектора (< 12 пк) у всех повышенный порядок
-			distanceFactor = 0.80f;
+	sNpcPlanetUprisingCooldowns[cPlanetRecordPtr(planet)] = now;
+
+	if (Math::randf() >= uprisingChance) {
+		return;
+	}
+
+	eastl::vector<cGameDataUFO*> loyalDefenders;
+	const auto& ufos = GetData<cGameDataUFO>();
+	for (const auto& ufo : ufos) {
+		if (ufo && ufo->mHealthPoints > 0 &&
+			ufo->mPoliticalID == ownerEmpire->GetEmpireID() &&
+			ufo->mUFOType == static_cast<int>(UfoType::Defender)) {
+			loyalDefenders.push_back(ufo.get());
 		}
 	}
 
-	// 9. Бонус/штраф симпатии (Affinity) к игроку, если штурмует сам игрок:
-	// Если идеология атакующего игрока близка жителям колонии (положительный Affinity), гарнизон охотнее свергает своих правителей!
-	float affinitySubversionFactor = 1.0f;
-	cEmpire* playerEmpire = GetPlayerEmpire();
-	if (playerEmpire && root->empireRelationsAnalyzer && DiplomacyUtils::War(ownerEmpire, playerEmpire)) {
-		int affinity = root->empireRelationsAnalyzer->EmpiresAffinity(ownerEmpire, playerEmpire);
-		if (affinity > 0) {
-			affinitySubversionFactor = 1.0f + min(affinity, 4) * 0.08f; // Симпатия к культуре игрока усиливает дезертирство
-		} else if (affinity <= -2) {
-			affinitySubversionFactor = 0.85f; // Идеологическая ненависть к захватчику сплачивает защитников
-		}
+	if (loyalDefenders.size() < 2) {
+		return;
 	}
 
-	float finalChance = rebellionChance * planetFactor * spiceFactor * urbanControlFactor * distanceFactor * affinitySubversionFactor * rebellionMultiplier;
-	finalChance = min(max(finalChance, 0.02f), 0.85f);
+	// От 1/4 до 2/5 орбитального гарнизона НПС переходит к путчистам и атакует ратуши, остальные остаются лоялистами
+	float rebelShare = (severeCityStrike && severeFiscalCrisis) ? 0.42f : 0.28f;
+	int rebelCount = max(static_cast<int>(round(static_cast<float>(loyalDefenders.size()) * rebelShare)), 1);
+	rebelCount = min(rebelCount, static_cast<int>(loyalDefenders.size()) - 1);
 
-	return (Math::randf() < finalChance);
+	for (int i = 0; i < rebelCount; ++i) {
+		cGameDataUFO* defector = loyalDefenders[i];
+		if (defector) {
+			defector->mPoliticalID = 0xFFFFFFFF;
+			defector->mUFOType = static_cast<int>(UfoType::Bomber);
+		}
+	}
 }
 
 static_detour(SpawnUFO__detour, cGameDataUFO*(UfoType, int*, ResourceKey*))
@@ -338,7 +473,7 @@ static_detour(SpawnUFO__detour, cGameDataUFO*(UfoType, int*, ResourceKey*))
 			return ufo;
 		}
 
-		// Защитников игрока обрабатывает первый мод Defensive Ships In Player Colonies
+		// Защитников игрока обрабатывает мод Defensive Ships In Player Colonies
 		if (ufoType == UfoType::Defender && ownerEmpire == GetPlayerEmpire()) {
 			return ufo;
 		}
@@ -351,16 +486,16 @@ static_detour(SpawnUFO__detour, cGameDataUFO*(UfoType, int*, ResourceKey*))
 		else if (ufoType == UfoType::Defender) {
 			customHP = root->spaceCombatMetrics->GetDefenderHealthByEmpire(ownerEmpire);
 		}
-		else if (typeInt == 4 || typeInt == 3) {
+		else if (typeInt == 4 || typeInt == 3) { // Raider / Fighter escort in UfoType enum
 			customHP = root->spaceCombatMetrics->GetFighterHealthByEmpire(ownerEmpire);
 		}
 
 		if (customHP > 1.0f) {
-			int maxTreasury = CalculateEmpireMaxTreasury(ownerEmpire, root);
-			int richThreshold = static_cast<int>(round(static_cast<float>(maxTreasury) * 0.80f));
-			int crisisThreshold = static_cast<int>(round(static_cast<float>(maxTreasury) * 0.15f));
+			int maxCap = CalculateDynamicMaxTreasury(ownerEmpire, root);
+			int eliteThreshold = static_cast<int>(round(static_cast<float>(maxCap) * 0.80f));
+			int crisisThreshold = static_cast<int>(round(static_cast<float>(maxCap) * 0.15f));
 
-			if (ownerEmpire->mStars.size() >= 3 && ownerEmpire->mEmpireMoney >= richThreshold) {
+			if (ownerEmpire->mStars.size() >= 3 && ownerEmpire->mEmpireMoney >= eliteThreshold) {
 				customHP *= 1.20f;
 			} else if (ownerEmpire->mEmpireMoney > 0 && ownerEmpire->mEmpireMoney < crisisThreshold) {
 				customHP *= 0.75f;
@@ -370,6 +505,7 @@ static_detour(SpawnUFO__detour, cGameDataUFO*(UfoType, int*, ResourceKey*))
 			ufo->mMaxHealthPoints = customHP;
 		}
 
+		// Мятеж защитников НПС при выпуске подкреплений во время активного боя
 		if (ufoType == UfoType::Defender && !sIsGeneratingInitialPlanetGarrison) {
 			if (ShouldTriggerNpcRebellion(ownerEmpire, root, ufo)) {
 				ufo->mPoliticalID = 0xFFFFFFFF;
@@ -385,63 +521,60 @@ member_detour(GenerateNpcPlanetDefenders__detour, cSimPlanetHighLOD, void(cPlane
 {
 	void detoured(cPlanet* planet)
 	{
+		if (!IsSpaceGame() || sIsGeneratingInitialPlanetGarrison) {
+			original_function(this, planet);
+			return;
+		}
+
 		sIsGeneratingInitialPlanetGarrison = true;
 		original_function(this, planet);
 
-		if (!IsSpaceGame() || !planet || !planet->mpPlanetRecord) {
-			sIsGeneratingInitialPlanetGarrison = false;
-			return;
-		}
+		if (planet && planet->mpPlanetRecord) {
+			cCompositionRoot* root = cCompositionRoot::Get();
+			if (root && root->spaceCombatMetrics) {
+				// Записываем точное число городов и турелей в кэш (для планет игрока и НПС)
+				root->spaceCombatMetrics->UpdatePlanetDefenseCache(planet->mpPlanetRecord.get());
 
-		cCompositionRoot* root = cCompositionRoot::Get();
-		if (!root || !root->spaceCombatMetrics || !root->simulationValidator) {
-			sIsGeneratingInitialPlanetGarrison = false;
-			return;
-		}
+				cEmpire* planetEmpire = planet->GetEmpire();
+				if (!planetEmpire && planet->mpPlanetRecord->GetStarRecord()) {
+					planetEmpire = StarManager.GetEmpire(planet->mpPlanetRecord->GetStarRecord()->mEmpireID);
+				}
 
-		// Записываем точное число городов и турелей в галактический кэш разведки
-		root->spaceCombatMetrics->UpdatePlanetDefenseCache(planet->mpPlanetRecord.get());
+				if (planetEmpire && planetEmpire != GetPlayerEmpire() &&
+					root->simulationValidator && root->simulationValidator->ValidEmpire(planetEmpire, false, true)) {
 
-		cEmpire* planetEmpire = planet->GetEmpire();
-		if (!planetEmpire || planetEmpire == GetPlayerEmpire()) {
-			sIsGeneratingInitialPlanetGarrison = false;
-			return;
-		}
+					int targetDefenders = root->spaceCombatMetrics->GetDefendersInPlanet(planet->mpPlanetRecord.get());
+					if (targetDefenders > 24) {
+						targetDefenders = 24;
+					}
 
-		if (!root->simulationValidator->ValidEmpire(planetEmpire, false, true)) {
-			sIsGeneratingInitialPlanetGarrison = false;
-			return;
-		}
+					int existingDefenders = 0;
+					const auto& ufos = GetData<cGameDataUFO>();
+					for (const auto& ufo : ufos) {
+						if (ufo && ufo->mHealthPoints > 0 &&
+							ufo->mPoliticalID == planetEmpire->GetEmpireID() &&
+							ufo->mUFOType == static_cast<int>(UfoType::Defender)) {
+							existingDefenders++;
+						}
+					}
 
-		int targetDefenders = root->spaceCombatMetrics->GetDefendersInPlanet(planet->mpPlanetRecord.get());
-		if (targetDefenders <= 0) {
-			sIsGeneratingInitialPlanetGarrison = false;
-			return;
-		}
+					int toSpawn = targetDefenders - existingDefenders;
+					if (toSpawn > 0) {
+						int* pPolID = &planetEmpire->mPoliticalID;
+						ResourceKey* pKey = &planetEmpire->mUFOKey;
+						for (int i = 0; i < toSpawn; ++i) {
+							STATIC_CALL(Address(ModAPI::ChooseAddress(0x0102bbb0, 0x0102acc0)),
+								cGameDataUFO*,
+								Args(UfoType, int*, ResourceKey*),
+								Args(UfoType::Defender, pPolID, pKey));
+						}
+					}
 
-		if (targetDefenders > 24) {
-			targetDefenders = 24;
-		}
-
-		int existingDefenders = 0;
-		const auto& ufos = GetData<cGameDataUFO>();
-		for (const auto& ufo : ufos) {
-			if (ufo && ufo->mHealthPoints > 0 &&
-				ufo->mPoliticalID == planetEmpire->GetEmpireID() &&
-				ufo->mUFOType == static_cast<int>(UfoType::Defender)) {
-				existingDefenders++;
-			}
-		}
-
-		int toSpawn = targetDefenders - existingDefenders;
-		if (toSpawn > 0) {
-			int* pPolID = &planetEmpire->mPoliticalID;
-			ResourceKey* pKey = &planetEmpire->mUFOKey;
-			for (int i = 0; i < toSpawn; ++i) {
-				STATIC_CALL(Address(ModAPI::ChooseAddress(0x0102bbb0, 0x0102acc0)),
-					cGameDataUFO*,
-					Args(UfoType, int*, ResourceKey*),
-					Args(UfoType::Defender, pPolID, pKey));
+					// Если у НПС на колонии забастовка заводов или казна слита войной — шанс застать гражданскую войну на орбите
+					if (!IsNpcPlanetInCombat(planet->mpPlanetRecord.get(), planetEmpire)) {
+						TryTriggerNpcPeacetimeColonialUprising(planet->mpPlanetRecord.get(), planetEmpire, root);
+					}
+				}
 			}
 		}
 
