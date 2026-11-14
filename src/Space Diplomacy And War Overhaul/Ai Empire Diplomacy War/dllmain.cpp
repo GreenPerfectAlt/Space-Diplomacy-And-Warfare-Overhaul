@@ -25,14 +25,13 @@
 #include "cPersistenceState.h"
 #include "cDatabaseManager.h"
 #include "Diplomacy/PersistedEvent/cPreparingToDeclareWarEvent.h"
+#include <cmath>
 
 using namespace SporeModUtils;
 using namespace Simulator;
 
 void Initialize()
 {
-	// CheatManager.AddCheat("DebugDiplomacy", new DebugDiplomacy());
-	// CheatManager.AddCheat("DebugWarfare", new DebugWarfare());
 	cSimulatorSystem::Get()->AddStrategy(new cCompositionRoot(), cCompositionRoot::NOUN_ID);
 	cSimulatorSystem::Get()->AddStrategy(new cDiplomacySystem(), cDiplomacySystem::NOUN_ID);
 	cSimulatorSystem::Get()->AddStrategy(new cWarfareSystem(), cWarfareSystem::NOUN_ID);
@@ -53,14 +52,8 @@ void Initialize()
 
 void Dispose()
 {
-	// This method is called when the game is closing
 }
 
-/// When an empire raids the system of another empire and the player is in the galactic view,
-/// a UFO spawns in a system of the first empire and travels to the target system.
-/// This is entirely cosmetic and can cause a crash in some, yet to be determined, circumstances.
-/// This is the method that controls whether to spawn that UFO or not, we always return false
-/// to prevent those UFOs from spawning and avoid that crash.
 member_detour(ShouldSpawnRaiderUFO__detour, cRaidEvent, bool())
 {
 	bool detoured()
@@ -70,7 +63,125 @@ member_detour(ShouldSpawnRaiderUFO__detour, cRaidEvent, bool())
 	}
 };
 
+static bool sIsGeneratingInitialPlanetGarrison = false;
 static bool sIsSpawningExtraNpcDefenders = false;
+
+static int CalculateDynamicMaxTreasury(cEmpire* empire, cCompositionRoot* root)
+{
+	if (!empire || !root || !root->warfareStrengthAnalyzer || !root->warfareStrengthAnalyzer->Cast(cWarfareStrengthAnalyzer::TYPE)) {
+		return 2000000;
+	}
+
+	float redSpiceFactor = 1.0f;
+	PropertyListPtr warfareConfigProp;
+	if (PropManager.GetPropertyList(id("WarfareConfig"), id("SwoConfig"), warfareConfigProp) && warfareConfigProp != nullptr) {
+		App::Property::GetFloat(warfareConfigProp.get(), 0xD07B1F69, redSpiceFactor);
+	}
+	int unitCost = max(static_cast<int>(std::round(1000.0f / max(redSpiceFactor, 0.1f))), 250);
+
+	float bombersOutput = root->warfareStrengthAnalyzer->GetBombersProducedByEmpire(empire);
+	int starCount = static_cast<int>(empire->mStars.size());
+
+	Simulator::Archetypes baseArch = ArchetypeUtils::GetBaseArchetype(empire->mArchetype);
+	float tradeMult = (baseArch == Archetypes::kArchetypeTrader) ? 1.75f : 1.0f;
+
+	int cycleIncome = static_cast<int>(std::round(bombersOutput * static_cast<float>(unitCost) * tradeMult));
+	int maxCap = static_cast<int>(std::round((50000.0f + starCount * 25000.0f + cycleIncome * 10.0f) * tradeMult));
+	return max(maxCap, 60000);
+}
+
+static bool IsNpcPlanetInCombat(cEmpire* ownerEmpire)
+{
+	if (!ownerEmpire || GetCurrentContext() != SpaceContext::Planet) {
+		return false;
+	}
+
+	cEmpire* playerEmp = GetPlayerEmpire();
+	if (playerEmp && DiplomacyUtils::War(ownerEmpire, playerEmp)) {
+		return true;
+	}
+
+	const auto& ufos = GetData<cGameDataUFO>();
+	for (const auto& ufo : ufos) {
+		if (ufo && ufo->mHealthPoints > 0 && ufo->mPoliticalID != 0 && ufo->mPoliticalID != ownerEmpire->GetEmpireID()) {
+			if (ufo->mUFOType == static_cast<int>(UfoType::Defender)) {
+				continue;
+			}
+			cEmpire* otherEmp = StarManager.GetEmpire(ufo->mPoliticalID);
+			if (!otherEmp || DiplomacyUtils::War(ownerEmpire, otherEmp)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static bool ShouldTriggerNpcRebellion(cEmpire* ownerEmpire, cCompositionRoot* root, cGameDataUFO* newlySpawnedUfo)
+{
+	if (!ownerEmpire || !root || !root->spaceCombatMetrics) {
+		return false;
+	}
+
+	if (GetCurrentContext() != SpaceContext::Planet) {
+		return false;
+	}
+
+	cPlanetRecord* activePlanet = GetActivePlanetRecord();
+	if (!activePlanet || !activePlanet->GetStarRecord() ||
+		activePlanet->GetStarRecord()->mEmpireID != ownerEmpire->GetEmpireID()) {
+		return false;
+	}
+
+	if (!IsNpcPlanetInCombat(ownerEmpire)) {
+		return false;
+	}
+
+	float rebellionMultiplier = 1.0f;
+	PropertyListPtr propListRebellion;
+	if (PropManager.GetPropertyList(id(u"RebellionConfig"), 0x02ae0c7e, propListRebellion) && propListRebellion != nullptr) {
+		App::Property::GetFloat(propListRebellion.get(), 0x07A1BC02, rebellionMultiplier);
+	}
+	if (rebellionMultiplier <= 0.01f) {
+		return false;
+	}
+
+	Simulator::Archetypes baseArch = ArchetypeUtils::GetBaseArchetype(ownerEmpire->mArchetype);
+	if (baseArch == Archetypes::kArchetypeZealot || baseArch == Archetypes::kArchetypeGrob) {
+		return false;
+	}
+
+	int maxTreasury = CalculateDynamicMaxTreasury(ownerEmpire, root);
+	int crisisThreshold = static_cast<int>(std::round(static_cast<float>(maxTreasury) * 0.15f));
+	bool isBankrupt = (ownerEmpire->mEmpireMoney > 0 && ownerEmpire->mEmpireMoney < crisisThreshold);
+
+	int targetDefenders = min(root->spaceCombatMetrics->GetDefendersInPlanet(activePlanet), 24);
+	int aliveDefenders = 0;
+	const auto& ufos = GetData<cGameDataUFO>();
+	for (const auto& ufo : ufos) {
+		if (ufo && ufo.get() != newlySpawnedUfo && ufo->mHealthPoints > 0 &&
+			ufo->mPoliticalID == ownerEmpire->GetEmpireID() &&
+			ufo->mUFOType == static_cast<int>(UfoType::Defender)) {
+			aliveDefenders++;
+		}
+	}
+	bool heavyLosses = (targetDefenders > 2 && aliveDefenders < (targetDefenders / 2));
+
+	if (!isBankrupt && !heavyLosses) {
+		return false;
+	}
+
+	float rebellionChance = 0.25f;
+	if (baseArch == Archetypes::kArchetypeWarrior) {
+		rebellionChance = 0.50f;
+	} else if (baseArch == Archetypes::kArchetypeTrader) {
+		rebellionChance = 0.40f;
+	} else if (baseArch == Archetypes::kArchetypeScientist || baseArch == Archetypes::kArchetypeEcologist) {
+		rebellionChance = 0.15f;
+	}
+
+	rebellionChance *= rebellionMultiplier;
+	return (Math::randf() < rebellionChance);
+}
 
 static_detour(SpawnUFO__detour, cGameDataUFO*(UfoType, int*, ResourceKey*))
 {
@@ -92,7 +203,7 @@ static_detour(SpawnUFO__detour, cGameDataUFO*(UfoType, int*, ResourceKey*))
 			return ufo;
 		}
 
-		// Do not override player defenders so Defensive Ships In Player Colonies handles them natively
+		// Защитников игрока обрабатывает мод Defensive Ships In Player Colonies
 		if (ufoType == UfoType::Defender && ownerEmpire == GetPlayerEmpire()) {
 			return ufo;
 		}
@@ -105,13 +216,30 @@ static_detour(SpawnUFO__detour, cGameDataUFO*(UfoType, int*, ResourceKey*))
 		else if (ufoType == UfoType::Defender) {
 			customHP = root->spaceCombatMetrics->GetDefenderHealthByEmpire(ownerEmpire);
 		}
-		else if (typeInt == 4 || typeInt == 3) { // Raider / Fighter escort in UfoType enum
+		else if (typeInt == 4 || typeInt == 3) {
 			customHP = root->spaceCombatMetrics->GetFighterHealthByEmpire(ownerEmpire);
 		}
 
 		if (customHP > 1.0f) {
+			int maxTreasury = CalculateDynamicMaxTreasury(ownerEmpire, root);
+			int wealthyThreshold = static_cast<int>(std::round(static_cast<float>(maxTreasury) * 0.80f));
+			int crisisThreshold = static_cast<int>(std::round(static_cast<float>(maxTreasury) * 0.15f));
+
+			if (ownerEmpire->mStars.size() >= 3 && ownerEmpire->mEmpireMoney > wealthyThreshold) {
+				customHP *= 1.20f;
+			} else if (ownerEmpire->mEmpireMoney > 0 && ownerEmpire->mEmpireMoney < crisisThreshold) {
+				customHP *= 0.75f;
+			}
+
 			ufo->mHealthPoints = customHP;
 			ufo->mMaxHealthPoints = customHP;
+		}
+
+		if (ufoType == UfoType::Defender && !sIsGeneratingInitialPlanetGarrison && !sIsSpawningExtraNpcDefenders) {
+			if (ShouldTriggerNpcRebellion(ownerEmpire, root, ufo)) {
+				ufo->mPoliticalID = 0xFFFFFFFF;
+				ufo->mUFOType = static_cast<int>(UfoType::Bomber);
+			}
 		}
 
 		return ufo;
@@ -122,19 +250,27 @@ member_detour(GenerateNpcPlanetDefenders__detour, cSimPlanetHighLOD, void(cPlane
 {
 	void detoured(cPlanet* planet)
 	{
+		sIsGeneratingInitialPlanetGarrison = true;
 		original_function(this, planet);
+		sIsGeneratingInitialPlanetGarrison = false;
 
 		if (!IsSpaceGame() || sIsSpawningExtraNpcDefenders || !planet || !planet->mpPlanetRecord) {
 			return;
 		}
 
-		cEmpire* planetEmpire = planet->GetEmpire();
-		if (!planetEmpire || planetEmpire == GetPlayerEmpire()) {
+		cCompositionRoot* root = cCompositionRoot::Get();
+		if (!root || !root->spaceCombatMetrics || !root->simulationValidator) {
 			return;
 		}
 
-		cCompositionRoot* root = cCompositionRoot::Get();
-		if (!root || !root->spaceCombatMetrics || !root->simulationValidator) {
+		// Сразу записываем в кэш число городов и турелей на любой посещенной планете (включая колонии игрока с Unlimited-Colony)
+		root->spaceCombatMetrics->UpdatePlanetDefenseCache(planet->mpPlanetRecord.get());
+
+		cEmpire* planetEmpire = planet->GetEmpire();
+		if (!planetEmpire && planet->mpPlanetRecord->GetStarRecord() != nullptr) {
+			planetEmpire = StarManager.GetEmpire(planet->mpPlanetRecord->GetStarRecord()->mEmpireID);
+		}
+		if (!planetEmpire || planetEmpire == GetPlayerEmpire()) {
 			return;
 		}
 
@@ -147,7 +283,6 @@ member_detour(GenerateNpcPlanetDefenders__detour, cSimPlanetHighLOD, void(cPlane
 			return;
 		}
 
-		// Cap orbital entities to protect framerate
 		if (targetDefenders > 24) {
 			targetDefenders = 24;
 		}
@@ -193,7 +328,6 @@ void AttachDetours()
 	GenerateNpcPlanetDefenders__detour::attach(Address(ModAPI::ChooseAddress(0x00ffa340, 0x00ff96b0)));
 }
 
-// Generally, you don't need to touch any code here
 BOOL APIENTRY DllMain( HMODULE hModule,
                        DWORD  ul_reason_for_call,
                        LPVOID lpReserved
