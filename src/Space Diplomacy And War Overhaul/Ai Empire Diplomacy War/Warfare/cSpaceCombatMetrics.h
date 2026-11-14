@@ -6,7 +6,17 @@
 
 #define cSpaceCombatMetricsPtr intrusive_ptr<cSpaceCombatMetrics>
 
+struct SdoPlanetGadgetInfo {
+	bool hasLoyaltyBooster = false;
+	bool hasHappinessBooster = false;
+	bool hasUberTurret = false;
+	bool hasSpiceStorage = false;
+	bool hasBioProtector = false;
+	bool hasEmbassy = false;
+};
+
 // Stores unit and defense stats used in space combat and
+
 // calculates those values given specific empires or planets.
 class cSpaceCombatMetrics 
 	: public Object
@@ -43,10 +53,11 @@ public:
 	int GetDefendersInPlanet(Simulator::cPlanetRecord* planet);
 	int GetTurretsInPlanet(Simulator::cPlanetRecord* planet);
 
-	// Кэш посещенных планет для Unlimited-Colony (города и турели)
+	// Кэш посещенных планет для Unlimited-Colony и построек колонизации
 	void UpdatePlanetDefenseCache(Simulator::cPlanetRecord* planet);
 	int GetCachedCityCount(Simulator::cPlanetRecord* planet) const;
 	int GetCachedTurretCount(Simulator::cPlanetRecord* planet) const;
+	SdoPlanetGadgetInfo GetPlanetGadgetInfo(Simulator::cPlanetRecord* planet);
 
 	eastl::vector<float> healthBomber;
 	eastl::vector<float> healthFighter;
@@ -63,4 +74,5 @@ public:
 
 private:
 	eastl::map<cPlanetRecordPtr, eastl::pair<int, int>> planetDefenseCache;
+	eastl::map<cPlanetRecordPtr, SdoPlanetGadgetInfo> planetGadgetCache;
 };
